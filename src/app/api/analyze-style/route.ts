@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { NextRequest, NextResponse } from "next/server";
 import { getAnthropicApiKey } from "@/lib/api-key";
+import { errorResponse, classifyAnthropicError } from "@/lib/error-codes";
 
 
 async function fetchPageText(url: string): Promise<string> {
@@ -32,14 +33,20 @@ async function fetchPageText(url: string): Promise<string> {
 export async function POST(req: NextRequest) {
   const apiKey = getAnthropicApiKey();
   if (!apiKey) {
-    return NextResponse.json({ error: "ANTHROPIC_API_KEY is not configured" }, { status: 500 });
+    return errorResponse("API_KEY_MISSING", { logContext: "analyze-style" });
   }
   const anthropic = new Anthropic({ apiKey, authToken: null });
 
-  const { urls } = await req.json() as { urls: string[] };
+  let parsed: { urls: string[] };
+  try {
+    parsed = await req.json();
+  } catch (err) {
+    return errorResponse("INVALID_REQUEST", { logContext: "analyze-style: bad json", cause: err });
+  }
+  const { urls } = parsed;
 
   if (!urls || urls.length === 0) {
-    return NextResponse.json({ error: "No URLs provided" }, { status: 400 });
+    return errorResponse("NO_URLS", { logContext: "no urls provided" });
   }
 
   const validUrls = urls
@@ -47,21 +54,30 @@ export async function POST(req: NextRequest) {
     .filter((u: string) => u && (u.startsWith("http://") || u.startsWith("https://")));
 
   if (validUrls.length === 0) {
-    return NextResponse.json({ error: "No valid URLs provided" }, { status: 400 });
+    return errorResponse("NO_URLS", { logContext: "no valid urls after filter" });
   }
 
-  try {
-    const texts: string[] = [];
-    for (const url of validUrls.slice(0, 3)) {
-      try {
-        const text = await fetchPageText(url);
-        texts.push(`--- 來源：${url} ---\n${text}`);
-      } catch (err) {
-        texts.push(`--- 來源：${url} ---\n（擷取失敗：${err instanceof Error ? err.message : "unknown"}）`);
-      }
+  // Fetch URLs first — track failures so we can decide if ALL failed
+  const texts: string[] = [];
+  let fetchedAny = false;
+  for (const url of validUrls.slice(0, 3)) {
+    try {
+      const text = await fetchPageText(url);
+      texts.push(`--- 來源：${url} ---\n${text}`);
+      fetchedAny = true;
+    } catch (err) {
+      console.warn(`[analyze-style] fetch fail url=${url}: ${err}`);
+      texts.push(`--- 來源：${url} ---\n（擷取失敗）`);
     }
+  }
 
-    const prompt = `以下是使用者提供的文章內容，請分析這些文章的寫作風格：
+  if (!fetchedAny) {
+    return errorResponse("URL_FETCH_FAIL", {
+      logContext: `all ${validUrls.length} urls failed to fetch`,
+    });
+  }
+
+  const prompt = `以下是使用者提供的文章內容，請分析這些文章的寫作風格：
 
 ${texts.join("\n\n")}
 
@@ -73,23 +89,24 @@ ${texts.join("\n\n")}
 
 直接回覆風格摘要，不要加標題或額外說明。`;
 
-    const message = await anthropic.messages.create({
+  let message;
+  try {
+    message = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
       max_tokens: 512,
       messages: [{ role: "user", content: prompt }],
     });
-
-    const textBlock = message.content.find((b) => b.type === "text");
-    if (!textBlock || textBlock.type !== "text") {
-      return NextResponse.json({ error: "No text in response" }, { status: 500 });
-    }
-
-    return NextResponse.json({ styleAnalysis: textBlock.text.trim() });
   } catch (err) {
-    console.error("Style analysis failed:", err);
-    return NextResponse.json(
-      { error: "Style analysis failed. Please try again." },
-      { status: 500 },
-    );
+    const code = classifyAnthropicError(err);
+    return errorResponse(code, { logContext: "analyze-style anthropic call", cause: err });
   }
+
+  const textBlock = message.content.find((b) => b.type === "text");
+  if (!textBlock || textBlock.type !== "text") {
+    return errorResponse("EMPTY_RESPONSE", {
+      logContext: `analyze-style empty stop=${message.stop_reason}`,
+    });
+  }
+
+  return NextResponse.json({ styleAnalysis: textBlock.text.trim() });
 }

@@ -14,6 +14,7 @@ import {
   checkSingleAndIncrement,
   getClientIp,
 } from "@/lib/rate-limit";
+import { errorResponse, classifyAnthropicError } from "@/lib/error-codes";
 
 /**
  * Replace literal control characters (newlines, tabs, CR) with their escape
@@ -54,48 +55,44 @@ function escapeControlCharsInJsonStrings(s: string): string {
 export async function POST(req: NextRequest) {
   const apiKey = getAnthropicApiKey();
   if (!apiKey) {
-    return NextResponse.json(
-      { error: "ANTHROPIC_API_KEY is not configured" },
-      { status: 500 },
-    );
+    return errorResponse("API_KEY_MISSING", { logContext: "email-generate" });
   }
 
   // Parse request body first so we can read batchId
-  const body = await req.json();
-  const { sequenceType, formData, dayIndex, additionalInstructions, batchId } = body as {
+  let body: {
     sequenceType: "trust" | "sales";
     formData: TrustFormData | SalesFormData;
     dayIndex: number;
     additionalInstructions?: string;
-    /** If present: this call is part of a "produce 7 emails" batch.
-     *  Same batchId used for all 7 calls counts as one batch. */
     batchId?: string;
   };
+  try {
+    body = await req.json();
+  } catch (err) {
+    return errorResponse("INVALID_REQUEST", { logContext: "email-generate: bad json", cause: err });
+  }
+  const { sequenceType, formData, dayIndex, additionalInstructions, batchId } = body;
 
   // Rate limit check
-  // - batchId present → check batch counter (5/day), dedupe per batchId so 7 calls = 1 use
-  // - no batchId → single regen counter (5/day)
   const ip = getClientIp(req);
   const rl = batchId
     ? await checkBatchAndIncrement(ip, batchId)
     : await checkSingleAndIncrement(ip);
 
   if (!rl.allowed) {
-    const reason =
-      rl.blockedBy === "batch"
-        ? "今日「產生一整套」額度已用完（5 / 5）。明天 00:00（台北時間）重置。"
-        : "今日「單封重新生成」額度已用完（5 / 5）。明天 00:00（台北時間）重置。";
-    return NextResponse.json(
+    return errorResponse(
+      rl.blockedBy === "batch" ? "RATE_LIMIT_BATCH" : "RATE_LIMIT_SINGLE",
       {
-        error: reason,
-        rateLimit: {
-          batch: rl.batch,
-          single: rl.single,
-          resetsAt: rl.resetsAt,
-          blockedBy: rl.blockedBy,
+        logContext: `rate-limit blocked ip=${ip} blockedBy=${rl.blockedBy}`,
+        extra: {
+          rateLimit: {
+            batch: rl.batch,
+            single: rl.single,
+            resetsAt: rl.resetsAt,
+            blockedBy: rl.blockedBy,
+          },
         },
       },
-      { status: 429 },
     );
   }
 
@@ -106,50 +103,62 @@ export async function POST(req: NextRequest) {
   const day = sequence[dayIndex];
 
   if (!day) {
-    return NextResponse.json({ error: "Invalid day index" }, { status: 400 });
+    return errorResponse("INVALID_DAY", {
+      logContext: `dayIndex=${dayIndex} seq=${sequenceType}`,
+    });
   }
 
+  let message;
   try {
     const userPrompt =
       sequenceType === "trust"
         ? buildTrustPrompt(formData as TrustFormData, day, additionalInstructions)
         : buildSalesPrompt(formData as SalesFormData, day, additionalInstructions);
 
-    const message = await anthropic.messages.create({
+    message = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
       max_tokens: 2048,
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content: userPrompt }],
     });
+  } catch (err) {
+    const code = classifyAnthropicError(err);
+    return errorResponse(code, {
+      logContext: `anthropic call failed day=${day.day} seq=${sequenceType}`,
+      cause: err,
+    });
+  }
 
-    const textBlock = message.content.find((b) => b.type === "text");
-    if (!textBlock || textBlock.type !== "text") {
-      return NextResponse.json({ error: "No text in response" }, { status: 500 });
-    }
+  const textBlock = message.content.find((b) => b.type === "text");
+  if (!textBlock || textBlock.type !== "text") {
+    return errorResponse("EMPTY_RESPONSE", {
+      logContext: `no text block, stop_reason=${message.stop_reason}`,
+    });
+  }
 
+  let emailData;
+  try {
     const jsonStr = textBlock.text
       .replace(/```json\n?/g, "")
       .replace(/```\n?/g, "")
       .trim();
-    const emailData = JSON.parse(escapeControlCharsInJsonStrings(jsonStr));
-
-    return NextResponse.json({
-      day: day.day,
-      theme: day.theme,
-      sendTiming: day.sendTiming,
-      ...emailData,
-      rateLimit: {
-        batch: rl.batch,
-        single: rl.single,
-        resetsAt: rl.resetsAt,
-      },
-    });
+    emailData = JSON.parse(escapeControlCharsInJsonStrings(jsonStr));
   } catch (err) {
-    console.error("Email generation failed:", err);
-    // Never expose internal error details (API key, model name, stack traces) to client
-    return NextResponse.json(
-      { error: "Email generation failed. Please try again." },
-      { status: 500 },
-    );
+    return errorResponse("JSON_PARSE_FAIL", {
+      logContext: `parse failed day=${day.day} text-preview=${textBlock.text.slice(0, 200)}`,
+      cause: err,
+    });
   }
+
+  return NextResponse.json({
+    day: day.day,
+    theme: day.theme,
+    sendTiming: day.sendTiming,
+    ...emailData,
+    rateLimit: {
+      batch: rl.batch,
+      single: rl.single,
+      resetsAt: rl.resetsAt,
+    },
+  });
 }

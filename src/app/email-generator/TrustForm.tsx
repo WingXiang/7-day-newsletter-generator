@@ -36,8 +36,10 @@ function AutoFillBtn({ fieldName, currentData, onResult }: {
   fieldName: string; currentData: Record<string, unknown>; onResult: (v: string) => void;
 }) {
   const [loading, setLoading] = useState(false);
+  const [errorTip, setErrorTip] = useState<string | null>(null);
   const handleClick = async () => {
     setLoading(true);
+    setErrorTip(null);
     try {
       const res = await fetch("/api/auto-fill", {
         method: "POST",
@@ -47,14 +49,27 @@ function AutoFillBtn({ fieldName, currentData, onResult }: {
       if (res.ok) {
         const { value } = await res.json();
         onResult(value);
+      } else {
+        const body = await res.json().catch(() => ({}));
+        // Use server-provided friendly title if available
+        const tip = body.title ?? "AI 填寫失敗，可手動輸入";
+        setErrorTip(tip);
+        // Auto-clear after 4s
+        setTimeout(() => setErrorTip(null), 4000);
       }
+    } catch {
+      setErrorTip("網路異常，請手動輸入");
+      setTimeout(() => setErrorTip(null), 4000);
     } finally { setLoading(false); }
   };
   return (
-    <button type="button" onClick={handleClick} disabled={loading}
-      className="ml-auto shrink-0 rounded-md bg-[#f5f0e8] px-2.5 py-1 text-xs font-medium text-[#1a2e1a] hover:bg-[#ebe5d8] disabled:opacity-50 transition-colors">
-      {loading ? "生成中..." : "AI 自動填寫"}
-    </button>
+    <div className="ml-auto flex shrink-0 items-center gap-2">
+      {errorTip && <span className="text-[11px] text-red-600">{errorTip}</span>}
+      <button type="button" onClick={handleClick} disabled={loading}
+        className="rounded-md bg-[#f5f0e8] px-2.5 py-1 text-xs font-medium text-[#1a2e1a] hover:bg-[#ebe5d8] disabled:opacity-50 transition-colors">
+        {loading ? "生成中..." : "AI 自動填寫"}
+      </button>
+    </div>
   );
 }
 
@@ -63,6 +78,7 @@ export default function TrustForm({ onSubmit }: { onSubmit: (d: TrustFormData) =
   const [fd, setFd] = useState<TrustFormData>({ ...DEFAULT_DATA });
   const [promptText, setPromptText] = useState("");
   const [analyzingStyle, setAnalyzingStyle] = useState(false);
+  const [analyzeError, setAnalyzeError] = useState<{ title: string; action: string; code?: string } | null>(null);
 
   const set = useCallback(<K extends keyof TrustFormData>(key: K, val: TrustFormData[K]) => {
     setFd(prev => ({ ...prev, [key]: val }));
@@ -97,6 +113,7 @@ export default function TrustForm({ onSubmit }: { onSubmit: (d: TrustFormData) =
     const urls = fd.pastContentUrls.split("\n").map(u => u.trim()).filter(Boolean);
     if (urls.length === 0) return;
     setAnalyzingStyle(true);
+    setAnalyzeError(null);
     try {
       const res = await fetch("/api/analyze-style", {
         method: "POST",
@@ -106,7 +123,19 @@ export default function TrustForm({ onSubmit }: { onSubmit: (d: TrustFormData) =
       if (res.ok) {
         const { styleAnalysis } = await res.json();
         set("styleAnalysis", styleAnalysis);
+      } else {
+        const body = await res.json().catch(() => ({}));
+        setAnalyzeError({
+          title: body.title ?? "風格分析失敗",
+          action: body.action ?? "請檢查網址是否正確後再試。",
+          code: body.code,
+        });
       }
+    } catch {
+      setAnalyzeError({
+        title: "無法連線到伺服器",
+        action: "檢查網路連線後重試。",
+      });
     } finally { setAnalyzingStyle(false); }
   };
 
@@ -295,6 +324,15 @@ export default function TrustForm({ onSubmit }: { onSubmit: (d: TrustFormData) =
               className="mt-2 rounded-lg bg-[#1a2e1a] px-4 py-2 text-sm font-medium text-white hover:bg-[#2a4a2a] disabled:opacity-50 transition-colors">
               {analyzingStyle ? "分析中..." : "分析寫作風格"}
             </button>
+            {analyzeError && (
+              <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm">
+                <p className="font-medium text-red-900">{analyzeError.title}</p>
+                <p className="mt-1 text-red-800">{analyzeError.action}</p>
+                {analyzeError.code && (
+                  <p className="mt-2 font-mono text-[11px] text-red-600">錯誤代碼：{analyzeError.code}</p>
+                )}
+              </div>
+            )}
             {fd.styleAnalysis && (
               <div className="mt-3 rounded-lg bg-[#faf8f3] border border-[#c9a84c]/30 p-4">
                 <span className="text-xs font-semibold text-[#c9a84c]">風格分析結果</span>

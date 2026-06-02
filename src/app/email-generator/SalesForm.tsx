@@ -36,8 +36,10 @@ function AutoFillBtn({ fieldName, currentData, onResult }: {
   fieldName: string; currentData: Record<string, unknown>; onResult: (v: string) => void;
 }) {
   const [loading, setLoading] = useState(false);
+  const [errorTip, setErrorTip] = useState<string | null>(null);
   const handleClick = async () => {
     setLoading(true);
+    setErrorTip(null);
     try {
       const res = await fetch("/api/auto-fill", {
         method: "POST",
@@ -47,14 +49,25 @@ function AutoFillBtn({ fieldName, currentData, onResult }: {
       if (res.ok) {
         const { value } = await res.json();
         onResult(value);
+      } else {
+        const body = await res.json().catch(() => ({}));
+        const tip = body.title ?? "AI 填寫失敗，可手動輸入";
+        setErrorTip(tip);
+        setTimeout(() => setErrorTip(null), 4000);
       }
+    } catch {
+      setErrorTip("網路異常，請手動輸入");
+      setTimeout(() => setErrorTip(null), 4000);
     } finally { setLoading(false); }
   };
   return (
-    <button type="button" onClick={handleClick} disabled={loading}
-      className="ml-auto shrink-0 rounded-md bg-[#f5f0e8] px-2.5 py-1 text-xs font-medium text-[#1a2e1a] hover:bg-[#ebe5d8] disabled:opacity-50 transition-colors">
-      {loading ? "生成中..." : "AI 自動填寫"}
-    </button>
+    <div className="ml-auto flex shrink-0 items-center gap-2">
+      {errorTip && <span className="text-[11px] text-red-600">{errorTip}</span>}
+      <button type="button" onClick={handleClick} disabled={loading}
+        className="rounded-md bg-[#f5f0e8] px-2.5 py-1 text-xs font-medium text-[#1a2e1a] hover:bg-[#ebe5d8] disabled:opacity-50 transition-colors">
+        {loading ? "生成中..." : "AI 自動填寫"}
+      </button>
+    </div>
   );
 }
 

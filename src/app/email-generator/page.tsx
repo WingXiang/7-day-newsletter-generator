@@ -5,6 +5,8 @@ import TrustForm from "./TrustForm";
 import SalesForm from "./SalesForm";
 import EmailCard from "./EmailCard";
 import KitIntegration from "./KitIntegration";
+import ErrorBanner, { parseErrorResponse, networkError } from "./ErrorBanner";
+import type { ParsedError } from "./ErrorBanner";
 import type {
   TrustFormData,
   SalesFormData,
@@ -75,7 +77,7 @@ export default function EmailGeneratorPage() {
   const [salesState, setSalesState] = useState<SeqState>({ ...INIT_SEQ });
   const [regeneratingKey, setRegeneratingKey] = useState<string | null>(null);
   const [kitOpen, setKitOpen] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ParsedError | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("block");
   const [listExpandedIndex, setListExpandedIndex] = useState<number | null>(null);
   const [rateLimit, setRateLimit] = useState<{
@@ -108,24 +110,40 @@ export default function EmailGeneratorPage() {
       additionalInstructions?: string,
       batchId?: string,
     ): Promise<EmailObject> => {
-      const res = await fetch("/api/email-generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sequenceType: seqType,
-          formData,
-          dayIndex,
-          additionalInstructions,
-          batchId,
-        }),
-      });
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({}));
-        if (res.status === 429 && d.rateLimit) {
-          setRateLimit({ ...d.rateLimit, enabled: true });
-        }
-        throw new Error(d.error || `Error ${res.status}`);
+      let res: Response;
+      try {
+        res = await fetch("/api/email-generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sequenceType: seqType,
+            formData,
+            dayIndex,
+            additionalInstructions,
+            batchId,
+          }),
+        });
+      } catch {
+        // Network failure — server unreachable
+        const ne = networkError();
+        const err = new Error(ne.title) as Error & { parsed: ParsedError };
+        err.parsed = ne;
+        throw err;
       }
+
+      if (!res.ok) {
+        const parsed = await parseErrorResponse(res);
+        // For rate limit errors the server includes current quota info in `extra`
+        const body = await res.clone().json().catch(() => ({} as Record<string, unknown>));
+        const extra = body.extra as { rateLimit?: { batch: { used: number; limit: number; remaining: number }; single: { used: number; limit: number; remaining: number }; resetsAt: string } } | undefined;
+        if (extra?.rateLimit) {
+          setRateLimit({ ...extra.rateLimit, enabled: true });
+        }
+        const err = new Error(parsed.title) as Error & { parsed: ParsedError };
+        err.parsed = parsed;
+        throw err;
+      }
+
       const data = await res.json();
       if (data.rateLimit) {
         setRateLimit({ ...data.rateLimit, enabled: true });
@@ -166,12 +184,14 @@ export default function EmailGeneratorPage() {
           }));
         } catch (err) {
           console.error(`Failed ${activeTab} email ${i}:`, err);
-          // If we got blocked at email #1 (batch quota exhausted), stop early
-          const msg = err instanceof Error ? err.message : "";
-          if (msg.includes("產生一整套") || msg.includes("一整套")) {
-            setError(msg);
+          const parsed = (err as Error & { parsed?: ParsedError }).parsed;
+          // For rate-limit / config errors, stop the whole batch early — same problem will hit every email
+          if (parsed && (parsed.code === "RATE_LIMIT_BATCH" || parsed.code === "API_KEY_MISSING" || parsed.code === "MODEL_AUTH_FAIL")) {
+            setError(parsed);
             break;
           }
+          // Other errors (timeout, parse fail) — keep going, individual emails can be regenerated
+          if (parsed) setError(parsed);
         }
         current++;
         setter((prev) => ({ ...prev, progress: { current, total: 7 } }));
@@ -189,6 +209,7 @@ export default function EmailGeneratorPage() {
       if (!st.formData) return;
       const key = `${activeTab}-${dayIndex}`;
       setRegeneratingKey(key);
+      setError(null);
       try {
         const email = await generateEmail(activeTab, st.formData, dayIndex, additionalInstructions);
         const setter = activeTab === "trust" ? setTrustState : setSalesState;
@@ -198,7 +219,14 @@ export default function EmailGeneratorPage() {
           return { ...prev, emails: next };
         });
       } catch (err) {
-        setError(`重新生成失敗：${err instanceof Error ? err.message : "未知錯誤"}`);
+        const parsed = (err as Error & { parsed?: ParsedError }).parsed;
+        setError(
+          parsed ?? {
+            code: "UNKNOWN",
+            title: "重新生成失敗",
+            action: "請重新整理頁面後再試。如果重複發生，請告知管理員。",
+          },
+        );
       }
       setRegeneratingKey(null);
     },
@@ -322,13 +350,10 @@ export default function EmailGeneratorPage() {
         ))}
       </div>
 
-      {/* Error */}
-      {error && (
-        <div className="mx-auto mb-4 max-w-3xl rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-          {error}
-          <button onClick={() => setError(null)} className="ml-2 font-medium underline">關閉</button>
-        </div>
-      )}
+      {/* Error banner */}
+      <div className="mx-auto max-w-3xl">
+        <ErrorBanner error={error} onDismiss={() => setError(null)} />
+      </div>
 
       {/* ── Form step ── */}
       {current.step === "form" && (
@@ -364,19 +389,19 @@ export default function EmailGeneratorPage() {
           {/* Actions bar */}
           <div className="mb-6 flex flex-wrap items-center gap-2">
             <button
-              onClick={() => { if (kitEmails.length === 0) { setError("尚無已產生的文案可匯出"); return; } handleExportDocx(); }}
+              onClick={() => { if (kitEmails.length === 0) { setError({ code: "UNKNOWN", title: "尚無已產生的文案可匯出", action: "請先點「產生 7 封信」按鈕產生內容後再匯出。" }); return; } handleExportDocx(); }}
               className="rounded-lg border border-[#1a2e1a] px-4 py-2 text-sm font-medium text-[#1a2e1a] transition-colors hover:bg-[#1a2e1a] hover:text-white"
             >
               匯出 DOCX
             </button>
             <button
-              onClick={() => { if (kitEmails.length === 0) { setError("尚無已產生的文案可匯出"); return; } handleExportTxt(); }}
+              onClick={() => { if (kitEmails.length === 0) { setError({ code: "UNKNOWN", title: "尚無已產生的文案可匯出", action: "請先點「產生 7 封信」按鈕產生內容後再匯出。" }); return; } handleExportTxt(); }}
               className="rounded-lg border border-[#1a2e1a] px-4 py-2 text-sm font-medium text-[#1a2e1a] transition-colors hover:bg-[#1a2e1a] hover:text-white"
             >
               匯出 TXT
             </button>
             <button
-              onClick={() => { if (kitEmails.length === 0) { setError("請先產生至少一封文案，才能發布到 Kit"); return; } setKitOpen(true); }}
+              onClick={() => { if (kitEmails.length === 0) { setError({ code: "UNKNOWN", title: "請先產生至少一封文案，才能發布到 Kit", action: "回到表單填寫資料後，點「產生 7 封信」按鈕。" }); return; } setKitOpen(true); }}
               className="rounded-lg bg-[#c9a84c] px-4 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-[#b89740]"
             >
               發布到 Kit
