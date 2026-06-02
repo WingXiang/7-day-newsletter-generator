@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, Fragment } from "react";
+import { useState, useCallback, useEffect, Fragment } from "react";
 import TrustForm from "./TrustForm";
 import SalesForm from "./SalesForm";
 import EmailCard from "./EmailCard";
@@ -49,6 +49,21 @@ export default function EmailGeneratorPage() {
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("block");
   const [listExpandedIndex, setListExpandedIndex] = useState<number | null>(null);
+  const [rateLimit, setRateLimit] = useState<{
+    used: number;
+    limit: number;
+    remaining: number;
+    resetsAt: string;
+    enabled: boolean;
+  } | null>(null);
+
+  // Fetch rate limit status on mount
+  useEffect(() => {
+    fetch("/api/rate-limit-status")
+      .then((r) => r.json())
+      .then((data) => setRateLimit(data))
+      .catch(() => {});
+  }, []);
 
   const current = activeTab === "trust" ? trustState : salesState;
   const setCurrent = activeTab === "trust" ? setTrustState : setSalesState;
@@ -74,11 +89,19 @@ export default function EmailGeneratorPage() {
       });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
+        // If rate limited, update local quota state so UI reflects it
+        if (res.status === 429 && d.rateLimit) {
+          setRateLimit({ ...d.rateLimit, enabled: true });
+        }
         throw new Error(d.error || `Error ${res.status}`);
       }
-      const data: EmailObject = await res.json();
+      const data = await res.json();
+      // Server returns rateLimit info alongside the email — update UI
+      if (data.rateLimit) {
+        setRateLimit({ ...data.rateLimit, enabled: true });
+      }
       // Strip any markdown symbols the model accidentally added
-      return { ...data, body: sanitizeBody(data.body) };
+      return { ...data, body: sanitizeBody(data.body) } as EmailObject;
     },
     [],
   );
@@ -232,6 +255,24 @@ export default function EmailGeneratorPage() {
         >
           電子報 7 天文案產生器
         </h1>
+        {rateLimit?.enabled && (
+          <div className="mt-3 flex items-center justify-center">
+            <div className={`inline-flex items-center gap-2 rounded-full border px-4 py-1.5 text-xs ${
+              rateLimit.remaining === 0
+                ? "border-red-200 bg-red-50 text-red-700"
+                : rateLimit.remaining <= 3
+                ? "border-amber-200 bg-amber-50 text-amber-700"
+                : "border-gray-200 bg-white text-gray-600"
+            }`}>
+              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <span>今日剩餘 <strong className="font-semibold">{rateLimit.remaining}</strong> / {rateLimit.limit} 次</span>
+              <span className="text-gray-400">·</span>
+              <span className="text-gray-400">台北時間 00:00 重置</span>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Tabs */}
