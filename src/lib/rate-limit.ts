@@ -1,6 +1,12 @@
 import { Redis } from "@upstash/redis";
 
-export const DAILY_LIMIT = 10;
+/** How many full batches (7-email generation) per IP per day. */
+export const BATCH_DAILY_LIMIT = 5;
+/** How many single-email regenerations per IP per day. */
+export const SINGLE_DAILY_LIMIT = 5;
+/** How long a batchId stays valid for follow-up calls (10 minutes). */
+const BATCH_CLAIM_TTL_SECONDS = 10 * 60;
+
 const TIMEZONE = "Asia/Taipei";
 
 let cachedRedis: Redis | null | undefined = undefined;
@@ -29,7 +35,6 @@ function getRedis(): Redis | null {
  * Get today's date string in Taipei timezone (YYYY-MM-DD format).
  */
 function getTaipeiDateKey(now: Date = new Date()): string {
-  // en-CA format gives YYYY-MM-DD
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: TIMEZONE,
     year: "numeric",
@@ -40,11 +45,9 @@ function getTaipeiDateKey(now: Date = new Date()): string {
 
 /**
  * Compute seconds until next midnight in Taipei time.
- * Used as Redis key TTL so the counter auto-resets at 00:00 Taipei.
  */
 function secondsUntilTaipeiMidnight(now: Date = new Date()): number {
-  // Get current time components in Taipei
-  const taipeiNow = new Intl.DateTimeFormat("en-US", {
+  const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: TIMEZONE,
     hour12: false,
     hour: "2-digit",
@@ -52,139 +55,229 @@ function secondsUntilTaipeiMidnight(now: Date = new Date()): number {
     second: "2-digit",
   }).formatToParts(now);
 
-  const h = parseInt(taipeiNow.find((p) => p.type === "hour")?.value ?? "0", 10);
-  const m = parseInt(taipeiNow.find((p) => p.type === "minute")?.value ?? "0", 10);
-  const s = parseInt(taipeiNow.find((p) => p.type === "second")?.value ?? "0", 10);
+  const h = parseInt(parts.find((p) => p.type === "hour")?.value ?? "0", 10);
+  const m = parseInt(parts.find((p) => p.type === "minute")?.value ?? "0", 10);
+  const s = parseInt(parts.find((p) => p.type === "second")?.value ?? "0", 10);
 
-  const elapsedSeconds = h * 3600 + m * 60 + s;
-  const remaining = 24 * 3600 - elapsedSeconds;
-  // At least 60s to avoid TTL=0 edge cases
-  return Math.max(remaining, 60);
-}
-
-export interface RateLimitStatus {
-  /** How many generations have been used today */
-  used: number;
-  /** Daily limit (10) */
-  limit: number;
-  /** How many remaining today */
-  remaining: number;
-  /** ISO string of next Taipei midnight */
-  resetsAt: string;
-  /** Whether rate limiting is active. False if Redis isn't configured */
-  enabled: boolean;
+  const elapsed = h * 3600 + m * 60 + s;
+  return Math.max(24 * 3600 - elapsed, 60);
 }
 
 function buildResetsAt(now: Date = new Date()): string {
-  const seconds = secondsUntilTaipeiMidnight(now);
-  return new Date(now.getTime() + seconds * 1000).toISOString();
+  return new Date(now.getTime() + secondsUntilTaipeiMidnight(now) * 1000).toISOString();
 }
+
+export interface RateLimitStatus {
+  batch: { used: number; limit: number; remaining: number };
+  single: { used: number; limit: number; remaining: number };
+  resetsAt: string;
+  enabled: boolean;
+}
+
+const defaultStatus = (now: Date, enabled: boolean): RateLimitStatus => ({
+  batch: { used: 0, limit: BATCH_DAILY_LIMIT, remaining: BATCH_DAILY_LIMIT },
+  single: { used: 0, limit: SINGLE_DAILY_LIMIT, remaining: SINGLE_DAILY_LIMIT },
+  resetsAt: buildResetsAt(now),
+  enabled,
+});
 
 /**
  * Check current usage WITHOUT incrementing. Used by status endpoint.
  */
 export async function getStatus(ip: string): Promise<RateLimitStatus> {
   const now = new Date();
-  const resetsAt = buildResetsAt(now);
-
   const redis = getRedis();
-  if (!redis) {
-    return { used: 0, limit: DAILY_LIMIT, remaining: DAILY_LIMIT, resetsAt, enabled: false };
-  }
+  if (!redis) return defaultStatus(now, false);
 
-  const key = `rl:${getTaipeiDateKey(now)}:${ip}`;
+  const date = getTaipeiDateKey(now);
+  const batchKey = `rl:batch:${date}:${ip}`;
+  const singleKey = `rl:single:${date}:${ip}`;
+
   try {
-    const used = ((await redis.get<number>(key)) ?? 0) | 0;
+    const [batchUsed, singleUsed] = await Promise.all([
+      redis.get<number>(batchKey),
+      redis.get<number>(singleKey),
+    ]);
+    const bu = (batchUsed ?? 0) | 0;
+    const su = (singleUsed ?? 0) | 0;
     return {
-      used,
-      limit: DAILY_LIMIT,
-      remaining: Math.max(0, DAILY_LIMIT - used),
-      resetsAt,
+      batch: {
+        used: bu,
+        limit: BATCH_DAILY_LIMIT,
+        remaining: Math.max(0, BATCH_DAILY_LIMIT - bu),
+      },
+      single: {
+        used: su,
+        limit: SINGLE_DAILY_LIMIT,
+        remaining: Math.max(0, SINGLE_DAILY_LIMIT - su),
+      },
+      resetsAt: buildResetsAt(now),
       enabled: true,
     };
   } catch (err) {
     console.error("[rate-limit] Redis get failed, fail-open:", err);
-    return { used: 0, limit: DAILY_LIMIT, remaining: DAILY_LIMIT, resetsAt, enabled: false };
+    return defaultStatus(now, false);
+  }
+}
+
+export interface CheckResult extends RateLimitStatus {
+  allowed: boolean;
+  /** Which counter triggered a block, if any */
+  blockedBy?: "batch" | "single";
+}
+
+/**
+ * Authorise a batch operation. Same batchId can be called up to 7 times
+ * (once per email in the batch) within BATCH_CLAIM_TTL_SECONDS without
+ * counting more than once.
+ */
+export async function checkBatchAndIncrement(
+  ip: string,
+  batchId: string,
+): Promise<CheckResult> {
+  const now = new Date();
+  const redis = getRedis();
+  if (!redis) return { ...defaultStatus(now, false), allowed: true };
+
+  const date = getTaipeiDateKey(now);
+  const batchKey = `rl:batch:${date}:${ip}`;
+  const singleKey = `rl:single:${date}:${ip}`;
+  const claimKey = `rl:batchclaim:${ip}:${batchId}`;
+
+  try {
+    // Try to claim this batchId. NX = only set if not exists.
+    // Returns "OK" if newly claimed, null if it already existed.
+    const claimed = await redis.set(claimKey, "1", {
+      nx: true,
+      ex: BATCH_CLAIM_TTL_SECONDS,
+    });
+
+    if (claimed === "OK") {
+      // First call of this batch → check quota and increment
+      const used = await redis.incr(batchKey);
+      if (used === 1) {
+        await redis.expire(batchKey, secondsUntilTaipeiMidnight(now));
+      }
+
+      const singleUsed = ((await redis.get<number>(singleKey)) ?? 0) | 0;
+
+      if (used > BATCH_DAILY_LIMIT) {
+        // Rollback the increment AND release the claim so user can retry tomorrow
+        await Promise.all([redis.decr(batchKey), redis.del(claimKey)]);
+        return {
+          allowed: false,
+          blockedBy: "batch",
+          batch: { used: BATCH_DAILY_LIMIT, limit: BATCH_DAILY_LIMIT, remaining: 0 },
+          single: {
+            used: singleUsed,
+            limit: SINGLE_DAILY_LIMIT,
+            remaining: Math.max(0, SINGLE_DAILY_LIMIT - singleUsed),
+          },
+          resetsAt: buildResetsAt(now),
+          enabled: true,
+        };
+      }
+
+      return {
+        allowed: true,
+        batch: {
+          used,
+          limit: BATCH_DAILY_LIMIT,
+          remaining: Math.max(0, BATCH_DAILY_LIMIT - used),
+        },
+        single: {
+          used: singleUsed,
+          limit: SINGLE_DAILY_LIMIT,
+          remaining: Math.max(0, SINGLE_DAILY_LIMIT - singleUsed),
+        },
+        resetsAt: buildResetsAt(now),
+        enabled: true,
+      };
+    }
+
+    // Already-claimed batch → don't increment, just return current state
+    const [batchUsed, singleUsed] = await Promise.all([
+      redis.get<number>(batchKey),
+      redis.get<number>(singleKey),
+    ]);
+    const bu = (batchUsed ?? 0) | 0;
+    const su = (singleUsed ?? 0) | 0;
+    return {
+      allowed: true,
+      batch: { used: bu, limit: BATCH_DAILY_LIMIT, remaining: Math.max(0, BATCH_DAILY_LIMIT - bu) },
+      single: { used: su, limit: SINGLE_DAILY_LIMIT, remaining: Math.max(0, SINGLE_DAILY_LIMIT - su) },
+      resetsAt: buildResetsAt(now),
+      enabled: true,
+    };
+  } catch (err) {
+    console.error("[rate-limit] Batch check failed, fail-open:", err);
+    return { ...defaultStatus(now, false), allowed: true };
   }
 }
 
 /**
- * Check limit and increment counter atomically.
- * Returns { allowed: true, ...status } if under limit (counter is incremented).
- * Returns { allowed: false, ...status } if over limit (counter NOT incremented further).
+ * Authorise a single-email regeneration.
  */
-export async function checkAndIncrement(
-  ip: string,
-): Promise<RateLimitStatus & { allowed: boolean }> {
+export async function checkSingleAndIncrement(ip: string): Promise<CheckResult> {
   const now = new Date();
-  const resetsAt = buildResetsAt(now);
-
   const redis = getRedis();
-  if (!redis) {
-    // Fail-open: no Redis configured → don't limit
-    return {
-      allowed: true,
-      used: 0,
-      limit: DAILY_LIMIT,
-      remaining: DAILY_LIMIT,
-      resetsAt,
-      enabled: false,
-    };
-  }
+  if (!redis) return { ...defaultStatus(now, false), allowed: true };
 
-  const key = `rl:${getTaipeiDateKey(now)}:${ip}`;
+  const date = getTaipeiDateKey(now);
+  const batchKey = `rl:batch:${date}:${ip}`;
+  const singleKey = `rl:single:${date}:${ip}`;
 
   try {
-    // Atomic increment + set TTL on first hit
-    const used = await redis.incr(key);
+    const used = await redis.incr(singleKey);
     if (used === 1) {
-      await redis.expire(key, secondsUntilTaipeiMidnight(now));
+      await redis.expire(singleKey, secondsUntilTaipeiMidnight(now));
     }
 
-    if (used > DAILY_LIMIT) {
-      // Roll back this increment so we don't keep counting past the limit
-      // (Optional, but keeps the number meaningful for the user)
-      await redis.decr(key);
+    const batchUsed = ((await redis.get<number>(batchKey)) ?? 0) | 0;
+
+    if (used > SINGLE_DAILY_LIMIT) {
+      await redis.decr(singleKey);
       return {
         allowed: false,
-        used: DAILY_LIMIT,
-        limit: DAILY_LIMIT,
-        remaining: 0,
-        resetsAt,
+        blockedBy: "single",
+        batch: {
+          used: batchUsed,
+          limit: BATCH_DAILY_LIMIT,
+          remaining: Math.max(0, BATCH_DAILY_LIMIT - batchUsed),
+        },
+        single: { used: SINGLE_DAILY_LIMIT, limit: SINGLE_DAILY_LIMIT, remaining: 0 },
+        resetsAt: buildResetsAt(now),
         enabled: true,
       };
     }
 
     return {
       allowed: true,
-      used,
-      limit: DAILY_LIMIT,
-      remaining: Math.max(0, DAILY_LIMIT - used),
-      resetsAt,
+      batch: {
+        used: batchUsed,
+        limit: BATCH_DAILY_LIMIT,
+        remaining: Math.max(0, BATCH_DAILY_LIMIT - batchUsed),
+      },
+      single: {
+        used,
+        limit: SINGLE_DAILY_LIMIT,
+        remaining: Math.max(0, SINGLE_DAILY_LIMIT - used),
+      },
+      resetsAt: buildResetsAt(now),
       enabled: true,
     };
   } catch (err) {
-    // Fail-open on Redis errors so the app stays usable
-    console.error("[rate-limit] Redis incr failed, fail-open:", err);
-    return {
-      allowed: true,
-      used: 0,
-      limit: DAILY_LIMIT,
-      remaining: DAILY_LIMIT,
-      resetsAt,
-      enabled: false,
-    };
+    console.error("[rate-limit] Single check failed, fail-open:", err);
+    return { ...defaultStatus(now, false), allowed: true };
   }
 }
 
 /**
- * Extract client IP from request headers.
- * Vercel sets x-forwarded-for and x-real-ip.
+ * Extract client IP from request headers (Vercel sets x-forwarded-for).
  */
 export function getClientIp(req: Request): string {
   const xff = req.headers.get("x-forwarded-for");
   if (xff) {
-    // Take the first IP (the original client)
     const first = xff.split(",")[0]?.trim();
     if (first) return first;
   }

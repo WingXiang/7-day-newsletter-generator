@@ -22,6 +22,35 @@ function sanitizeBody(text: string): string {
     .replace(/^\d+\.\s/gm, "");
 }
 
+// Pill displaying one quota counter in the header
+function QuotaPill({
+  label,
+  used,
+  limit,
+  remaining,
+}: {
+  label: string;
+  used: number;
+  limit: number;
+  remaining: number;
+}) {
+  const color =
+    remaining === 0
+      ? "border-red-200 bg-red-50 text-red-700"
+      : remaining === 1
+      ? "border-amber-200 bg-amber-50 text-amber-700"
+      : "border-gray-200 bg-white text-gray-600";
+  return (
+    <div className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs ${color}`}>
+      <span className="text-gray-500">{label}</span>
+      <span>
+        <strong className="font-semibold">{used}</strong>
+        <span className="text-gray-400"> / {limit}</span>
+      </span>
+    </div>
+  );
+}
+
 type Tab = "trust" | "sales";
 type Step = "form" | "generating" | "results";
 type ViewMode = "block" | "list";
@@ -50,9 +79,8 @@ export default function EmailGeneratorPage() {
   const [viewMode, setViewMode] = useState<ViewMode>("block");
   const [listExpandedIndex, setListExpandedIndex] = useState<number | null>(null);
   const [rateLimit, setRateLimit] = useState<{
-    used: number;
-    limit: number;
-    remaining: number;
+    batch: { used: number; limit: number; remaining: number };
+    single: { used: number; limit: number; remaining: number };
     resetsAt: string;
     enabled: boolean;
   } | null>(null);
@@ -70,12 +98,15 @@ export default function EmailGeneratorPage() {
   const seqInfo = activeTab === "trust" ? TRUST_SEQUENCE : SALES_SEQUENCE;
 
   // ── Generate a single email ──
+  // `batchId` present → counts as part of a full-batch produce (5/day shared by all 7 calls)
+  // `batchId` absent  → counts as a single regen (5/day)
   const generateEmail = useCallback(
     async (
       seqType: Tab,
       formData: TrustFormData | SalesFormData,
       dayIndex: number,
       additionalInstructions?: string,
+      batchId?: string,
     ): Promise<EmailObject> => {
       const res = await fetch("/api/email-generate", {
         method: "POST",
@@ -85,28 +116,26 @@ export default function EmailGeneratorPage() {
           formData,
           dayIndex,
           additionalInstructions,
+          batchId,
         }),
       });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
-        // If rate limited, update local quota state so UI reflects it
         if (res.status === 429 && d.rateLimit) {
           setRateLimit({ ...d.rateLimit, enabled: true });
         }
         throw new Error(d.error || `Error ${res.status}`);
       }
       const data = await res.json();
-      // Server returns rateLimit info alongside the email — update UI
       if (data.rateLimit) {
         setRateLimit({ ...data.rateLimit, enabled: true });
       }
-      // Strip any markdown symbols the model accidentally added
       return { ...data, body: sanitizeBody(data.body) } as EmailObject;
     },
     [],
   );
 
-  // ── Submit handler ──
+  // ── Submit handler (produce 7-email batch) ──
   const handleSubmit = useCallback(
     async (formData: TrustFormData | SalesFormData) => {
       const setter = activeTab === "trust" ? setTrustState : setSalesState;
@@ -118,12 +147,18 @@ export default function EmailGeneratorPage() {
       });
       setError(null);
 
+      // One batchId shared by all 7 calls so the server counts them as ONE batch
+      const batchId =
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
       let current = 0;
       const results: (EmailObject | null)[] = Array(7).fill(null);
 
       for (let i = 0; i < 7; i++) {
         try {
-          const email = await generateEmail(activeTab, formData, i);
+          const email = await generateEmail(activeTab, formData, i, undefined, batchId);
           results[i] = email;
           setter((prev) => ({
             ...prev,
@@ -131,6 +166,12 @@ export default function EmailGeneratorPage() {
           }));
         } catch (err) {
           console.error(`Failed ${activeTab} email ${i}:`, err);
+          // If we got blocked at email #1 (batch quota exhausted), stop early
+          const msg = err instanceof Error ? err.message : "";
+          if (msg.includes("產生一整套") || msg.includes("一整套")) {
+            setError(msg);
+            break;
+          }
         }
         current++;
         setter((prev) => ({ ...prev, progress: { current, total: 7 } }));
@@ -256,21 +297,10 @@ export default function EmailGeneratorPage() {
           電子報 7 天文案產生器
         </h1>
         {rateLimit?.enabled && (
-          <div className="mt-3 flex items-center justify-center">
-            <div className={`inline-flex items-center gap-2 rounded-full border px-4 py-1.5 text-xs ${
-              rateLimit.remaining === 0
-                ? "border-red-200 bg-red-50 text-red-700"
-                : rateLimit.remaining <= 3
-                ? "border-amber-200 bg-amber-50 text-amber-700"
-                : "border-gray-200 bg-white text-gray-600"
-            }`}>
-              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              <span>今日剩餘 <strong className="font-semibold">{rateLimit.remaining}</strong> / {rateLimit.limit} 次</span>
-              <span className="text-gray-400">·</span>
-              <span className="text-gray-400">台北時間 00:00 重置</span>
-            </div>
+          <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+            <QuotaPill label="產生一整套" used={rateLimit.batch.used} limit={rateLimit.batch.limit} remaining={rateLimit.batch.remaining} />
+            <QuotaPill label="單封重新生成" used={rateLimit.single.used} limit={rateLimit.single.limit} remaining={rateLimit.single.remaining} />
+            <span className="text-xs text-gray-400">台北時間 00:00 重置</span>
           </div>
         )}
       </div>

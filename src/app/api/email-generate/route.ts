@@ -9,7 +9,11 @@ import {
 } from "@/lib/email-prompts";
 import type { TrustFormData, SalesFormData } from "@/lib/email-prompts";
 import { getAnthropicApiKey } from "@/lib/api-key";
-import { checkAndIncrement, getClientIp } from "@/lib/rate-limit";
+import {
+  checkBatchAndIncrement,
+  checkSingleAndIncrement,
+  getClientIp,
+} from "@/lib/rate-limit";
 
 /**
  * Replace literal control characters (newlines, tabs, CR) with their escape
@@ -56,36 +60,47 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Rate limit check (10 generations per IP per day, resets at Taipei midnight)
+  // Parse request body first so we can read batchId
+  const body = await req.json();
+  const { sequenceType, formData, dayIndex, additionalInstructions, batchId } = body as {
+    sequenceType: "trust" | "sales";
+    formData: TrustFormData | SalesFormData;
+    dayIndex: number;
+    additionalInstructions?: string;
+    /** If present: this call is part of a "produce 7 emails" batch.
+     *  Same batchId used for all 7 calls counts as one batch. */
+    batchId?: string;
+  };
+
+  // Rate limit check
+  // - batchId present → check batch counter (5/day), dedupe per batchId so 7 calls = 1 use
+  // - no batchId → single regen counter (5/day)
   const ip = getClientIp(req);
-  const rl = await checkAndIncrement(ip);
+  const rl = batchId
+    ? await checkBatchAndIncrement(ip, batchId)
+    : await checkSingleAndIncrement(ip);
+
   if (!rl.allowed) {
+    const reason =
+      rl.blockedBy === "batch"
+        ? "今日「產生一整套」額度已用完（5 / 5）。明天 00:00（台北時間）重置。"
+        : "今日「單封重新生成」額度已用完（5 / 5）。明天 00:00（台北時間）重置。";
     return NextResponse.json(
       {
-        error: "今日額度已用完。明天 00:00（台北時間）重置。",
-        rateLimit: { used: rl.used, limit: rl.limit, remaining: rl.remaining, resetsAt: rl.resetsAt },
-      },
-      {
-        status: 429,
-        headers: {
-          "X-RateLimit-Limit": String(rl.limit),
-          "X-RateLimit-Remaining": String(rl.remaining),
-          "X-RateLimit-Reset": rl.resetsAt,
+        error: reason,
+        rateLimit: {
+          batch: rl.batch,
+          single: rl.single,
+          resetsAt: rl.resetsAt,
+          blockedBy: rl.blockedBy,
         },
       },
+      { status: 429 },
     );
   }
 
   // Pass authToken: null to prevent SDK from picking up empty ANTHROPIC_AUTH_TOKEN env var
   const anthropic = new Anthropic({ apiKey, authToken: null });
-
-  const body = await req.json();
-  const { sequenceType, formData, dayIndex, additionalInstructions } = body as {
-    sequenceType: "trust" | "sales";
-    formData: TrustFormData | SalesFormData;
-    dayIndex: number;
-    additionalInstructions?: string;
-  };
 
   const sequence = sequenceType === "trust" ? TRUST_SEQUENCE : SALES_SEQUENCE;
   const day = sequence[dayIndex];
@@ -118,22 +133,17 @@ export async function POST(req: NextRequest) {
       .trim();
     const emailData = JSON.parse(escapeControlCharsInJsonStrings(jsonStr));
 
-    return NextResponse.json(
-      {
-        day: day.day,
-        theme: day.theme,
-        sendTiming: day.sendTiming,
-        ...emailData,
-        rateLimit: { used: rl.used, limit: rl.limit, remaining: rl.remaining, resetsAt: rl.resetsAt },
+    return NextResponse.json({
+      day: day.day,
+      theme: day.theme,
+      sendTiming: day.sendTiming,
+      ...emailData,
+      rateLimit: {
+        batch: rl.batch,
+        single: rl.single,
+        resetsAt: rl.resetsAt,
       },
-      {
-        headers: {
-          "X-RateLimit-Limit": String(rl.limit),
-          "X-RateLimit-Remaining": String(rl.remaining),
-          "X-RateLimit-Reset": rl.resetsAt,
-        },
-      },
-    );
+    });
   } catch (err) {
     console.error("Email generation failed:", err);
     // Never expose internal error details (API key, model name, stack traces) to client
