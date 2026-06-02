@@ -430,9 +430,9 @@ export default function EmailGeneratorPage() {
             </div>
           )}
 
-          {/* Block view (3-column grid) */}
+          {/* Block view (2-column grid) */}
           {viewMode === "block" && (
-            <div className="grid grid-cols-1 gap-4 pb-8 md:grid-cols-3">
+            <div className="grid grid-cols-1 gap-4 pb-8 md:grid-cols-2">
               {current.emails.map((email, index) => (
                 <EmailCard
                   key={`${activeTab}-${index}`}
