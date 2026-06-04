@@ -32,6 +32,7 @@ export type ErrorCode =
   | "AUTOFILL_FAIL"
   | "UNKNOWN_FIELD"
   | "NETWORK_FAIL"
+  | "ARTICLE_FETCH_FAIL"
   | "UNKNOWN";
 
 interface ErrorMeta {
@@ -149,6 +150,14 @@ export const ERROR_CATALOG: Record<ErrorCode, ErrorMeta> = {
     title: "無法連線到伺服器",
     action: "檢查網路連線後重試。如果是公司網路，可能被防火牆擋住。",
     httpStatus: 0,
+  },
+
+  // ── Article generation ──
+  ARTICLE_FETCH_FAIL: {
+    title: "無法讀取任何文章內容",
+    action:
+      "請確認網址是否公開可訪問（不需登入），或改用「貼上全文」模式直接貼入文章內容。",
+    httpStatus: 502,
   },
 
   // ── Fallback ──

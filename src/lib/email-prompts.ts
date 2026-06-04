@@ -294,6 +294,152 @@ export const SALES_EXAMPLE_DATA: SalesFormData = {
   bonuses: "購買加贈：一對一閱讀策略諮詢 30 分鐘 + 2026 年度最強書單 PDF",
 };
 
+// ── Article-based generation types ──
+
+export interface ArticleEntry {
+  type: "url" | "text";
+  value: string;
+}
+
+export interface ArticleFormData {
+  articles: ArticleEntry[];
+  emailType: "trust" | "sales";
+  brandName?: string;
+  targetAudience?: string;
+  freeResource?: string;
+  socialLinks?: string;
+  productName?: string;
+  price?: string;
+  discountCode?: string;
+  discountDeadline?: string;
+}
+
+export function buildArticleEmailPrompt(
+  articleTexts: string[],
+  emailType: "trust" | "sales",
+  day: SequenceDay,
+  optionalFields?: Partial<ArticleFormData>,
+  additionalInstructions?: string,
+): string {
+  const articleSection = articleTexts
+    .map((text, i) => `=== 文章 ${i + 1} ===\n${text}`)
+    .join("\n\n");
+
+  const optionalParts: string[] = [];
+  if (optionalFields?.brandName) optionalParts.push(`- 品牌名稱：${optionalFields.brandName}`);
+  if (optionalFields?.targetAudience) optionalParts.push(`- 目標受眾：${optionalFields.targetAudience}`);
+  if (emailType === "trust") {
+    if (optionalFields?.freeResource) optionalParts.push(`- 免費資源/鉛磁鐵：${optionalFields.freeResource}`);
+    if (optionalFields?.socialLinks) optionalParts.push(`- 社群平台連結：${optionalFields.socialLinks}`);
+  } else {
+    if (optionalFields?.productName) optionalParts.push(`- 產品名稱：${optionalFields.productName}`);
+    if (optionalFields?.price) optionalParts.push(`- 產品價格：${optionalFields.price}`);
+    if (optionalFields?.discountCode) {
+      let disc = `- 優惠折扣碼：${optionalFields.discountCode}`;
+      if (optionalFields?.discountDeadline) disc += `（截止日期：${optionalFields.discountDeadline}）`;
+      optionalParts.push(disc);
+    }
+  }
+
+  const optionalSection =
+    optionalParts.length > 0
+      ? `## 補充資訊（使用者提供，優先參考）\n\n${optionalParts.join("\n")}\n\n`
+      : "";
+
+  const seqLabel = emailType === "trust" ? "信任信" : "銷售信";
+
+  return `以下是品牌過往的 ${articleTexts.length} 篇文章，請分析其寫作風格、主題與受眾，再撰寫對應電子報：
+
+${articleSection}
+
+---
+
+${optionalSection}## 任務
+
+請為「${seqLabel}」撰寫第 ${day.day} 封 Email。
+
+- 本封主題：${day.theme}
+- 策略目標：${day.strategyGoal}
+- 發送時機：${day.sendTiming}
+
+## 寫作要求
+
+1. 嚴格模仿文章的寫作風格、語氣和用詞習慣，讓讀者感覺這封信和熟悉的作者風格完全一致
+2. 品牌名稱請從文章中自行推斷，若使用者有提供則優先使用
+3. 不需依照文章順序，依信件策略選擇最適合的內容角度
+4. 如文章數量不足 7 篇，請根據既有文章風格自行發揮補充
+
+${additionalInstructions ? `### 額外指示\n${additionalInstructions}\n` : ""}請以 JSON 格式回覆。正文請用純文字格式撰寫，使用段落換行來組織內容，不要使用任何 emoji、圖示符號、** 粗體標記或其他 markdown 格式符號。正文長度建議在 300-500 字之間。`;
+}
+
+export const ARTICLE_EXAMPLE_DATA: ArticleFormData = {
+  emailType: "trust",
+  articles: [
+    {
+      type: "text",
+      value: `我一直以為自己是那種「沒有早起基因」的人。
+
+鬧鐘設 6 點，按掉。再設 6:15，再按掉。最後拖到 8 點才睜開眼，然後用整個早上的愧疚感開啟一天。
+
+直到有一天，我把問題搞反了。
+
+我問的不再是「我要怎麼讓自己早起」，而是「早起後我真正想做什麼？」
+
+這個問題改變了一切。我發現我其實很想在安靜的早晨讀一本喜歡的書，喝一杯熱咖啡，在任何事情打擾我之前，先跟自己在一起 30 分鐘。
+
+於是我不再設「鬧鐘」，而是設「邀請」。邀請自己去做那件讓我期待的事。
+
+第一週，我只有 3 天成功。但這 3 天讓我嘗到了那種清晨的安靜，那種「一天才開始就已經做了一件好事」的踏實感。
+
+第二週，我成功了 5 天。
+
+現在，18 個月過去了，我幾乎沒有例外。
+
+早起這件事，不是靠意志力撐過去的。是靠找到一個你真正想要的「為什麼」。
+
+你的早晨，可以是你的。只要你先問清楚，你想用它來做什麼。`,
+    },
+    {
+      type: "text",
+      value: `上個月有個讀者問我：「我讀了很多書，但好像什麼都記不住，這樣還有意義嗎？」
+
+我的答案讓他有點意外：「有意義，而且你比你以為的記得更多。」
+
+我們對「記住」這件事有個誤解，以為記住就是能把書中的話逐字重複。但那是考試，不是閱讀。
+
+真正的吸收，是讀到某個時刻，你心裡有一個聲音說：「對，就是這樣。」然後那個感覺悄悄改變了你看某件事的角度。
+
+你不記得在哪本書看過，但你的判斷變了。你的提問方式變了。你在某個對話中突然說出一句讓自己都驚訝的話，那就是閱讀留下的痕跡。
+
+我自己有個習慣：讀完一本書，我只寫下三個字——這本書讓我對什麼事有了新的理解？
+
+不是摘要，不是金句，就是那個「改變了什麼」的感覺。
+
+有時候只有一句話。有時候什麼都沒有，但那沒關係，那本書可能是在替下一本書鋪路。
+
+閱讀是長期的事，別用短期的標準來衡量它。`,
+    },
+    {
+      type: "text",
+      value: `我有一個觀察：真正持續進步的人，不是最努力的人，而是最會「降低門檻」的人。
+
+很多人把學習這件事搞得太隆重。要找到完整的一小時、要有專注的環境、要把手機放遠、要準備好筆記本。條件一個都不滿足，就覺得「算了，今天不適合學習」。
+
+但持續學習的人是這樣想的：「我現在有 7 分鐘，能做什麼？」
+
+7 分鐘可以讀 3 頁書。可以複習昨天學的一個概念。可以把腦子裡模糊的想法寫成一段文字。
+
+累積起來，7 分鐘乘以 200 天，是 23 個小時的學習時間。
+
+我自己最有效的學習方式，是「隨手可得」。書放在餐桌上，不用去書房。Podcast 在洗碗的時候聽，不用另外找時間。想法用手機備忘錄記，不用等到坐下來才整理。
+
+學習不需要儀式感，它需要的是頻率。
+
+你不是沒有時間學習，你只是把「學習」這件事的門檻設得太高了。`,
+    },
+  ],
+};
+
 export const SALES_FIELD_HINTS: Record<string, { label: string; why: string; placeholder: string }> = {
   brandName: { label: "品牌名稱", why: "讓 AI 在信件中正確稱呼你的品牌", placeholder: "你的品牌名稱" },
   productName: { label: "產品 / 課程名稱", why: "讓 AI 知道要銷售的是什麼", placeholder: "你的主打產品名稱" },
