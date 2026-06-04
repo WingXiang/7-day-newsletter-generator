@@ -100,12 +100,19 @@ export default function EmailGeneratorPage() {
   const [error, setError] = useState<ParsedError | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("block");
   const [listExpandedIndex, setListExpandedIndex] = useState<number | null>(null);
+  // Block view: row-level expand sync — cards 0&1, 2&3, 4&5, 6 each form a row
+  const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
   const [rateLimit, setRateLimit] = useState<{
     batch: { used: number; limit: number; remaining: number };
     single: { used: number; limit: number; remaining: number };
     resetsAt: string;
     enabled: boolean;
   } | null>(null);
+
+  // Reset block expanded rows when switching tabs
+  useEffect(() => {
+    setExpandedRows(new Set());
+  }, [activeTab]);
 
   // Fetch rate limit status on mount
   useEffect(() => {
@@ -248,6 +255,7 @@ export default function EmailGeneratorPage() {
         progress: { current: 0, total: 7 },
       });
       setError(null);
+      setExpandedRows(new Set());
 
       const batchId =
         typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -291,6 +299,7 @@ export default function EmailGeneratorPage() {
         progress: { current: 0, total: 7 },
       });
       setError(null);
+      setExpandedRows(new Set());
 
       // Phase A: fetch article texts
       let articleTexts: string[];
@@ -437,6 +446,17 @@ export default function EmailGeneratorPage() {
     },
     [],
   );
+
+  // ── Toggle row expansion (block view pair-sync) ──
+  const handleToggleRow = useCallback((index: number) => {
+    const row = Math.floor(index / 2);
+    setExpandedRows((prev) => {
+      const next = new Set(prev);
+      if (next.has(row)) next.delete(row);
+      else next.add(row);
+      return next;
+    });
+  }, []);
 
   // ── Copy ──
   const handleCopy = useCallback(async (email: EmailObject) => {
@@ -671,6 +691,7 @@ export default function EmailGeneratorPage() {
               onClick={() => {
                 if (isArticleTab) setArticleState({ ...INIT_ARTICLE_SEQ, emails: Array(7).fill(null) });
                 else setCurrent({ ...INIT_SEQ });
+                setExpandedRows(new Set());
               }}
               className="rounded-lg px-4 py-2 text-sm text-gray-500 transition-colors hover:bg-white"
             >
@@ -793,6 +814,8 @@ export default function EmailGeneratorPage() {
                   onRegenerate={(instr) => activeRegenerate(index, instr)}
                   onCopy={email ? () => handleCopy(email) : undefined}
                   onUpdate={(updated) => activeUpdateEmail(index, updated)}
+                  isExpanded={expandedRows.has(Math.floor(index / 2))}
+                  onToggleExpand={() => handleToggleRow(index)}
                 />
               ))}
             </div>

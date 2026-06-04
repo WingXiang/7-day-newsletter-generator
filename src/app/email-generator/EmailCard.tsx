@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import type { EmailObject, SequenceDay } from "@/lib/email-prompts";
 
 interface EmailCardProps {
@@ -11,12 +11,14 @@ interface EmailCardProps {
   onRegenerate: (instructions?: string) => void;
   onCopy?: () => void;
   onUpdate?: (updated: EmailObject) => void;
+  isExpanded: boolean;
+  onToggleExpand: () => void;
 }
 
 export default function EmailCard({
   email, index, dayInfo, isRegenerating, onRegenerate, onCopy, onUpdate,
+  isExpanded, onToggleExpand,
 }: EmailCardProps) {
-  const [expanded, setExpanded] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [editSubject, setEditSubject] = useState("");
   const [editBody, setEditBody] = useState("");
@@ -49,6 +51,14 @@ export default function EmailCard({
     setRegenInstructions("");
   };
 
+  // Reset editing/regen UI when card is collapsed via pair-sync
+  useEffect(() => {
+    if (!isExpanded) {
+      setIsEditing(false);
+      setShowRegenInput(false);
+    }
+  }, [isExpanded]);
+
   // Empty / failed state
   if (!email) {
     return (
@@ -70,7 +80,7 @@ export default function EmailCard({
   return (
     <div className="flex h-full flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm transition-shadow hover:shadow-md">
       {/* Header */}
-      <button onClick={() => setExpanded(!expanded)} className="flex w-full items-start gap-3 p-4 text-left">
+      <button onClick={onToggleExpand} className="flex w-full items-start gap-3 p-4 text-left">
         <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#1a2e1a] text-xs font-semibold text-white">{index + 1}</span>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-1.5">
@@ -79,13 +89,13 @@ export default function EmailCard({
           </div>
           <p className="mt-1 line-clamp-2 text-sm font-medium text-gray-900">{email.subject}</p>
         </div>
-        <svg className={`mt-0.5 h-4 w-4 shrink-0 text-gray-400 transition-transform ${expanded ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <svg className={`mt-0.5 h-4 w-4 shrink-0 text-gray-400 transition-transform ${isExpanded ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
         </svg>
       </button>
 
       {/* Expanded */}
-      {expanded && (
+      {isExpanded && (
         <div className="flex-1 border-t border-gray-100 px-4 pb-4">
           {isEditing ? (
             /* ── Edit mode ── */
