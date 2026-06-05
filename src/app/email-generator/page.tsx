@@ -100,8 +100,8 @@ export default function EmailGeneratorPage() {
   const [error, setError] = useState<ParsedError | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("block");
   const [listExpandedIndex, setListExpandedIndex] = useState<number | null>(null);
-  // Block view: row-level expand sync — cards 0&1, 2&3, 4&5, 6 each form a row
-  const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
+  // Block view: which card index is expanded (full-width col-span-2); null = all collapsed
+  const [blockExpandedIndex, setBlockExpandedIndex] = useState<number | null>(null);
   const [rateLimit, setRateLimit] = useState<{
     batch: { used: number; limit: number; remaining: number };
     single: { used: number; limit: number; remaining: number };
@@ -109,9 +109,9 @@ export default function EmailGeneratorPage() {
     enabled: boolean;
   } | null>(null);
 
-  // Reset block expanded rows when switching tabs
+  // Reset block expanded index when switching tabs
   useEffect(() => {
-    setExpandedRows(new Set());
+    setBlockExpandedIndex(null);
   }, [activeTab]);
 
   // Fetch rate limit status on mount
@@ -255,7 +255,7 @@ export default function EmailGeneratorPage() {
         progress: { current: 0, total: 7 },
       });
       setError(null);
-      setExpandedRows(new Set());
+      setBlockExpandedIndex(null);
 
       const batchId =
         typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -299,7 +299,7 @@ export default function EmailGeneratorPage() {
         progress: { current: 0, total: 7 },
       });
       setError(null);
-      setExpandedRows(new Set());
+      setBlockExpandedIndex(null);
 
       // Phase A: fetch article texts
       let articleTexts: string[];
@@ -447,15 +447,9 @@ export default function EmailGeneratorPage() {
     [],
   );
 
-  // ── Toggle row expansion (block view pair-sync) ──
-  const handleToggleRow = useCallback((index: number) => {
-    const row = Math.floor(index / 2);
-    setExpandedRows((prev) => {
-      const next = new Set(prev);
-      if (next.has(row)) next.delete(row);
-      else next.add(row);
-      return next;
-    });
+  // ── Toggle single card full-width expansion (block view) ──
+  const handleToggleBlock = useCallback((index: number) => {
+    setBlockExpandedIndex((prev) => (prev === index ? null : index));
   }, []);
 
   // ── Copy ──
@@ -691,7 +685,7 @@ export default function EmailGeneratorPage() {
               onClick={() => {
                 if (isArticleTab) setArticleState({ ...INIT_ARTICLE_SEQ, emails: Array(7).fill(null) });
                 else setCurrent({ ...INIT_SEQ });
-                setExpandedRows(new Set());
+                setBlockExpandedIndex(null);
               }}
               className="rounded-lg px-4 py-2 text-sm text-gray-500 transition-colors hover:bg-white"
             >
@@ -805,18 +799,22 @@ export default function EmailGeneratorPage() {
           {viewMode === "block" && (
             <div className="grid grid-cols-1 gap-4 pb-8 md:grid-cols-2">
               {displayEmails.map((email, index) => (
-                <EmailCard
-                  key={`${activeTab}-${index}`}
-                  email={email}
-                  index={index}
-                  dayInfo={displaySeqInfo[index]}
-                  isRegenerating={regeneratingKey === `${activeTab}-${index}`}
-                  onRegenerate={(instr) => activeRegenerate(index, instr)}
-                  onCopy={email ? () => handleCopy(email) : undefined}
-                  onUpdate={(updated) => activeUpdateEmail(index, updated)}
-                  isExpanded={expandedRows.has(Math.floor(index / 2))}
-                  onToggleExpand={() => handleToggleRow(index)}
-                />
+                <div
+                  key={`block-wrap-${activeTab}-${index}`}
+                  className={blockExpandedIndex === index ? "md:col-span-2" : ""}
+                >
+                  <EmailCard
+                    email={email}
+                    index={index}
+                    dayInfo={displaySeqInfo[index]}
+                    isRegenerating={regeneratingKey === `${activeTab}-${index}`}
+                    onRegenerate={(instr) => activeRegenerate(index, instr)}
+                    onCopy={email ? () => handleCopy(email) : undefined}
+                    onUpdate={(updated) => activeUpdateEmail(index, updated)}
+                    isExpanded={blockExpandedIndex === index}
+                    onToggleExpand={() => handleToggleBlock(index)}
+                  />
+                </div>
               ))}
             </div>
           )}

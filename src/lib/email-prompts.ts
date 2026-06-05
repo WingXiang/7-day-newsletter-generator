@@ -374,6 +374,10 @@ ${additionalInstructions ? `### 額外指示\n${additionalInstructions}\n` : ""}
 
 export const ARTICLE_EXAMPLE_DATA: ArticleFormData = {
   emailType: "trust",
+  brandName: "學習羅盤",
+  targetAudience: "25-40 歲、工作繁忙的上班族，想持續學習卻覺得沒時間或不知從何開始",
+  freeResource: "免費 PDF：7 天讀書習慣養成計畫表",
+  socialLinks: "IG @learning.compass",
   articles: [
     {
       type: "text",

@@ -15,6 +15,62 @@ const MAX_ARTICLES = 7;
 
 const DEFAULT_ARTICLE: ArticleEntry = { type: "text", value: "" };
 
+/** AI 自動填寫按鈕（根據已輸入的文章推斷欄位內容） */
+function AutoFillBtn({
+  fieldName,
+  emailType,
+  articleTexts,
+  onResult,
+}: {
+  fieldName: string;
+  emailType: "trust" | "sales";
+  articleTexts: string[];
+  onResult: (v: string) => void;
+}) {
+  const [loading, setLoading] = useState(false);
+  const [errorTip, setErrorTip] = useState<string | null>(null);
+
+  const handleClick = async () => {
+    setLoading(true);
+    setErrorTip(null);
+    try {
+      const res = await fetch("/api/auto-fill", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fieldName, sequenceType: "article", emailType, articleTexts }),
+      });
+      if (res.ok) {
+        const { value } = await res.json() as { value: string };
+        onResult(value);
+      } else {
+        const body = await res.json().catch(() => ({})) as { title?: string };
+        setErrorTip(body.title ?? "AI 填寫失敗，可手動輸入");
+        setTimeout(() => setErrorTip(null), 4000);
+      }
+    } catch {
+      setErrorTip("網路異常，請手動輸入");
+      setTimeout(() => setErrorTip(null), 4000);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="ml-auto flex shrink-0 items-center gap-2">
+      {errorTip && <span className="text-[11px] text-red-600">{errorTip}</span>}
+      <button
+        type="button"
+        onClick={handleClick}
+        disabled={loading || articleTexts.length === 0}
+        title={articleTexts.length === 0 ? "請先填入文章內容" : ""}
+        className="rounded-md bg-[#f5f0e8] px-2.5 py-1 text-xs font-medium text-[#1a2e1a] hover:bg-[#ebe5d8] disabled:opacity-50 transition-colors"
+      >
+        {loading ? "生成中..." : "AI 自動填寫"}
+      </button>
+    </div>
+  );
+}
+
 function makeDefault(): ArticleFormData {
   return {
     emailType: "trust",
@@ -69,6 +125,10 @@ export default function ArticleForm({ onSubmit }: { onSubmit: (d: ArticleFormDat
 
   const validArticleCount = fd.articles.filter((a) => a.value.trim().length > 0).length;
   const canSubmit = validArticleCount >= MIN_ARTICLES;
+  // Article texts available for AI auto-fill (text-mode only; URL mode texts aren't fetched yet)
+  const articleTextsForAI = inputMode === "text"
+    ? fd.articles.map((a) => a.value.trim()).filter(Boolean)
+    : [];
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -224,7 +284,11 @@ export default function ArticleForm({ onSubmit }: { onSubmit: (d: ArticleFormDat
 
         <div className="space-y-4">
           <div>
-            <label className={labelCls}>品牌名稱</label>
+            <div className="flex items-center">
+              <label className={labelCls}>品牌名稱</label>
+              <AutoFillBtn fieldName="brandName" emailType={fd.emailType} articleTexts={articleTextsForAI}
+                onResult={(v) => setFd((prev) => ({ ...prev, brandName: v }))} />
+            </div>
             <input
               type="text"
               value={fd.brandName || ""}
@@ -235,7 +299,11 @@ export default function ArticleForm({ onSubmit }: { onSubmit: (d: ArticleFormDat
           </div>
 
           <div>
-            <label className={labelCls}>目標受眾</label>
+            <div className="flex items-center">
+              <label className={labelCls}>目標受眾</label>
+              <AutoFillBtn fieldName="targetAudience" emailType={fd.emailType} articleTexts={articleTextsForAI}
+                onResult={(v) => setFd((prev) => ({ ...prev, targetAudience: v }))} />
+            </div>
             <input
               type="text"
               value={fd.targetAudience || ""}
@@ -248,7 +316,11 @@ export default function ArticleForm({ onSubmit }: { onSubmit: (d: ArticleFormDat
           {fd.emailType === "trust" && (
             <>
               <div>
-                <label className={labelCls}>免費資源 / 鉛磁鐵</label>
+                <div className="flex items-center">
+                  <label className={labelCls}>免費資源 / 鉛磁鐵</label>
+                  <AutoFillBtn fieldName="freeResource" emailType="trust" articleTexts={articleTextsForAI}
+                    onResult={(v) => setFd((prev) => ({ ...prev, freeResource: v }))} />
+                </div>
                 <input
                   type="text"
                   value={fd.freeResource || ""}
@@ -273,7 +345,11 @@ export default function ArticleForm({ onSubmit }: { onSubmit: (d: ArticleFormDat
           {fd.emailType === "sales" && (
             <>
               <div>
-                <label className={labelCls}>產品名稱</label>
+                <div className="flex items-center">
+                  <label className={labelCls}>產品名稱</label>
+                  <AutoFillBtn fieldName="productName" emailType="sales" articleTexts={articleTextsForAI}
+                    onResult={(v) => setFd((prev) => ({ ...prev, productName: v }))} />
+                </div>
                 <input
                   type="text"
                   value={fd.productName || ""}

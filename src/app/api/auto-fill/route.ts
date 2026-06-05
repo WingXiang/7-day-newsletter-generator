@@ -14,14 +14,77 @@ export async function POST(req: NextRequest) {
   }
   const anthropic = new Anthropic({ apiKey, authToken: null });
 
-  let parsed: { fieldName: string; sequenceType: "trust" | "sales"; currentData: Record<string, unknown> };
+  let parsed: {
+    fieldName: string;
+    sequenceType: "trust" | "sales" | "article";
+    currentData?: Record<string, unknown>;
+    articleTexts?: string[];
+    emailType?: "trust" | "sales";
+  };
   try {
     parsed = await req.json();
   } catch (err) {
     return errorResponse("INVALID_REQUEST", { logContext: "auto-fill: bad json", cause: err });
   }
-  const { fieldName, sequenceType, currentData } = parsed;
+  const { fieldName, sequenceType } = parsed;
 
+  // ── Article-based auto-fill ──
+  if (sequenceType === "article") {
+    const articleTexts = parsed.articleTexts ?? [];
+    const emailType = parsed.emailType ?? "trust";
+    const hints = emailType === "trust" ? TRUST_FIELD_HINTS : SALES_FIELD_HINTS;
+    const fieldHint = hints[fieldName];
+    if (!fieldHint) {
+      return errorResponse("UNKNOWN_FIELD", {
+        logContext: `field=${fieldName} article emailType=${emailType}`,
+      });
+    }
+
+    const articleSection = articleTexts
+      .slice(0, 5)
+      .map((t, i) => `=== 文章 ${i + 1} ===\n${t.slice(0, 600)}`)
+      .join("\n\n");
+
+    const prompt = `你是一位行銷顧問，正在協助使用者根據過往文章自動填寫電子報表單。
+
+以下是使用者提供的部分文章內容（供推斷品牌資訊）：
+
+${articleSection || "（尚未提供文章內容）"}
+
+請根據上方的文章內容，推斷並填寫「${fieldHint.label}」欄位。
+欄位說明：${fieldHint.why}
+
+要求：
+- 使用繁體中文
+- 直接從文章中推斷，不要憑空捏造
+- 若文章中無法判斷（例如價格、折扣碼），請輸出「請手動填寫」
+- 字數適中，不要太長
+- 直接回覆欄位內容，不要加任何額外說明`;
+
+    let message;
+    try {
+      message = await anthropic.messages.create({
+        model: "claude-sonnet-4-6",
+        max_tokens: 256,
+        messages: [{ role: "user", content: prompt }],
+      });
+    } catch (err) {
+      const cls = classifyAnthropicError(err);
+      if (cls === "MODEL_AUTH_FAIL" || cls === "MODEL_REFUSED") {
+        return errorResponse(cls, { logContext: `auto-fill article field=${fieldName}`, cause: err });
+      }
+      return errorResponse("AUTOFILL_FAIL", { logContext: `auto-fill article field=${fieldName}`, cause: err });
+    }
+
+    const textBlock = message.content.find((b) => b.type === "text");
+    if (!textBlock || textBlock.type !== "text") {
+      return errorResponse("EMPTY_RESPONSE", { logContext: `auto-fill article empty` });
+    }
+    return NextResponse.json({ value: textBlock.text.trim() });
+  }
+
+  // ── Trust / Sales auto-fill (original) ──
+  const currentData = parsed.currentData ?? {};
   const hints = sequenceType === "trust" ? TRUST_FIELD_HINTS : SALES_FIELD_HINTS;
   const fieldHint = hints[fieldName];
   if (!fieldHint) {
@@ -68,8 +131,6 @@ ${filledFields || "（尚未填寫任何欄位）"}
       messages: [{ role: "user", content: prompt }],
     });
   } catch (err) {
-    // For autofill, prefer the autofill-specific code over MODEL_FAILED to give
-    // the user the gentler "you can type it manually" guidance.
     const cls = classifyAnthropicError(err);
     if (cls === "MODEL_AUTH_FAIL" || cls === "MODEL_REFUSED") {
       return errorResponse(cls, { logContext: `auto-fill field=${fieldName}`, cause: err });
