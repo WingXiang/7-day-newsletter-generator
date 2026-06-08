@@ -141,6 +141,26 @@ export async function createBroadcast(
 
 // ── Helpers ──
 
+/**
+ * Convert plain newsletter body text into clean, editor-friendly HTML for Kit
+ * broadcasts: one <p> per non-empty line, special chars escaped, no <br>/<ul>.
+ *
+ * Kit's broadcast editor imports clean semantic <p> paragraphs as native,
+ * directly-editable text blocks. Mixed markup (<br>, <ul>) instead lands as a
+ * single raw-HTML block that the user can't edit inline — which is why the
+ * broadcast path uses this rather than markdownToHtml().
+ */
+export function textToEditableHtml(text: string): string {
+  const escapeHtml = (s: string) =>
+    s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return text
+    .split(/\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => `<p>${escapeHtml(line)}</p>`)
+    .join("");
+}
+
 export function markdownToHtml(md: string): string {
   return md
     .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")

@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import type { EmailObject } from "@/lib/email-prompts";
-import { markdownToHtml } from "@/lib/kit-api";
+import { textToEditableHtml } from "@/lib/kit-api";
 
 interface KitBroadcastProps {
   email: EmailObject;
@@ -66,7 +66,7 @@ export default function KitBroadcast({ email, onClose }: KitBroadcastProps) {
         params: {
           subject: email.subject,
           preview_text: email.previewText,
-          content: markdownToHtml(email.body),
+          content: textToEditableHtml(email.body),
           description: email.subject,
         },
       });
