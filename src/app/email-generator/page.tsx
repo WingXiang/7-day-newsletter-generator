@@ -4,14 +4,17 @@ import { useState, useCallback, useEffect, Fragment } from "react";
 import TrustForm from "./TrustForm";
 import SalesForm from "./SalesForm";
 import ArticleForm from "./ArticleForm";
+import SingleForm from "./SingleForm";
 import EmailCard from "./EmailCard";
 import KitIntegration from "./KitIntegration";
+import KitBroadcast from "./KitBroadcast";
 import ErrorBanner, { parseErrorResponse, networkError } from "./ErrorBanner";
 import type { ParsedError } from "./ErrorBanner";
 import type {
   TrustFormData,
   SalesFormData,
   ArticleFormData,
+  SingleFormData,
   EmailObject,
 } from "@/lib/email-prompts";
 import { TRUST_SEQUENCE, SALES_SEQUENCE } from "@/lib/email-prompts";
@@ -55,9 +58,10 @@ function QuotaPill({
   );
 }
 
-type Tab = "trust" | "sales" | "article";
+type Tab = "trust" | "sales" | "article" | "single";
 type Step = "form" | "generating" | "results";
 type ArticleStep = "form" | "fetching" | "generating" | "results";
+type SingleStep = "form" | "generating" | "results";
 type ViewMode = "block" | "list";
 
 interface SeqState {
@@ -90,11 +94,27 @@ const INIT_ARTICLE_SEQ: ArticleSeqState = {
   progress: { current: 0, total: 7 },
 };
 
+interface SingleState {
+  step: SingleStep;
+  formData: SingleFormData | null;
+  articleTexts: string[] | null;
+  email: EmailObject | null;
+}
+
+const INIT_SINGLE: SingleState = {
+  step: "form",
+  formData: null,
+  articleTexts: null,
+  email: null,
+};
+
 export default function EmailGeneratorPage() {
   const [activeTab, setActiveTab] = useState<Tab>("trust");
   const [trustState, setTrustState] = useState<SeqState>({ ...INIT_SEQ });
   const [salesState, setSalesState] = useState<SeqState>({ ...INIT_SEQ });
   const [articleState, setArticleState] = useState<ArticleSeqState>({ ...INIT_ARTICLE_SEQ, emails: Array(7).fill(null) });
+  const [singleState, setSingleState] = useState<SingleState>({ ...INIT_SINGLE });
+  const [singleExpanded, setSingleExpanded] = useState(true);
   const [regeneratingKey, setRegeneratingKey] = useState<string | null>(null);
   const [kitOpen, setKitOpen] = useState(false);
   const [error, setError] = useState<ParsedError | null>(null);
@@ -123,6 +143,7 @@ export default function EmailGeneratorPage() {
   }, []);
 
   const isArticleTab = activeTab === "article";
+  const isSingleTab = activeTab === "single";
   const current = activeTab === "trust" ? trustState : salesState;
   const setCurrent = activeTab === "trust" ? setTrustState : setSalesState;
   const seqInfo = activeTab === "trust" ? TRUST_SEQUENCE : SALES_SEQUENCE;
@@ -452,6 +473,184 @@ export default function EmailGeneratorPage() {
     setBlockExpandedIndex((prev) => (prev === index ? null : index));
   }, []);
 
+  // ── Generate the single weekly newsletter ──
+  const generateSingle = useCallback(
+    async (
+      formData: SingleFormData,
+      articleTexts: string[] | undefined,
+      additionalInstructions?: string,
+    ): Promise<EmailObject> => {
+      let res: Response;
+      try {
+        res = await fetch("/api/single-generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            layout: formData.layout,
+            brandTheme: formData.brandTheme,
+            issueTopic: formData.issueTopic,
+            articleTexts,
+            targetAudience: formData.targetAudience,
+            keyPoints: formData.keyPoints,
+            ctaGoal: formData.ctaGoal,
+            toneStyle: formData.toneStyle,
+            customTone: formData.customTone,
+            additionalInstructions,
+          }),
+        });
+      } catch {
+        const ne = networkError();
+        const err = new Error(ne.title) as Error & { parsed: ParsedError };
+        err.parsed = ne;
+        throw err;
+      }
+
+      if (!res.ok) {
+        const parsed = await parseErrorResponse(res);
+        const body = await res.clone().json().catch(() => ({} as Record<string, unknown>));
+        const extra = body.extra as { rateLimit?: { batch: { used: number; limit: number; remaining: number }; single: { used: number; limit: number; remaining: number }; resetsAt: string } } | undefined;
+        if (extra?.rateLimit) {
+          setRateLimit({ ...extra.rateLimit, enabled: true });
+        }
+        const err = new Error(parsed.title) as Error & { parsed: ParsedError };
+        err.parsed = parsed;
+        throw err;
+      }
+
+      const data = await res.json();
+      if (data.rateLimit) {
+        setRateLimit({ ...data.rateLimit, enabled: true });
+      }
+      return { ...data, body: sanitizeBody(data.body) } as EmailObject;
+    },
+    [],
+  );
+
+  // ── Submit handler (single newsletter) ──
+  const handleSingleSubmit = useCallback(
+    async (formData: SingleFormData) => {
+      setSingleState({ step: "generating", formData, articleTexts: null, email: null });
+      setError(null);
+      setSingleExpanded(true);
+
+      // Phase A (article mode only): fetch article texts for style mimicry
+      let articleTexts: string[] | undefined;
+      if (formData.inputMode === "article" && formData.articles && formData.articles.length > 0) {
+        try {
+          const res = await fetch("/api/article-fetch", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ articles: formData.articles }),
+          });
+          if (!res.ok) {
+            const parsed = await parseErrorResponse(res);
+            const err = new Error(parsed.title) as Error & { parsed: ParsedError };
+            err.parsed = parsed;
+            throw err;
+          }
+          const data = await res.json();
+          articleTexts = data.texts;
+        } catch (err) {
+          const parsed = (err as Error & { parsed?: ParsedError }).parsed ?? networkError();
+          setError(parsed);
+          setSingleState((prev) => ({ ...prev, step: "form" }));
+          return;
+        }
+      }
+
+      // Phase B: generate the email
+      try {
+        const email = await generateSingle(formData, articleTexts);
+        setSingleState({ step: "results", formData, articleTexts: articleTexts ?? null, email });
+      } catch (err) {
+        const parsed = (err as Error & { parsed?: ParsedError }).parsed;
+        if (parsed) setError(parsed);
+        // Keep form data so the user can retry from the empty result card.
+        setSingleState({ step: "results", formData, articleTexts: articleTexts ?? null, email: null });
+      }
+    },
+    [generateSingle],
+  );
+
+  // ── Regenerate the single newsletter ──
+  const handleSingleRegenerate = useCallback(
+    async (additionalInstructions?: string) => {
+      if (!singleState.formData) return;
+      setRegeneratingKey("single-0");
+      setError(null);
+      try {
+        const email = await generateSingle(
+          singleState.formData,
+          singleState.articleTexts ?? undefined,
+          additionalInstructions,
+        );
+        setSingleState((prev) => ({ ...prev, email }));
+      } catch (err) {
+        const parsed = (err as Error & { parsed?: ParsedError }).parsed;
+        setError(
+          parsed ?? {
+            code: "UNKNOWN",
+            title: "重新生成失敗",
+            action: "請重新整理頁面後再試。如果重複發生，請告知管理員。",
+          },
+        );
+      }
+      setRegeneratingKey(null);
+    },
+    [singleState.formData, singleState.articleTexts, generateSingle],
+  );
+
+  // ── Update the single newsletter (inline editing) ──
+  const handleSingleUpdate = useCallback((updated: EmailObject) => {
+    setSingleState((prev) => ({ ...prev, email: updated }));
+  }, []);
+
+  // ── Export single newsletter ──
+  const handleSingleExportDocx = useCallback(async () => {
+    if (!singleState.email) {
+      setError({ code: "UNKNOWN", title: "尚無已產生的文案可匯出", action: "請先產生單篇週報後再匯出。" });
+      return;
+    }
+    const brand = singleState.formData?.brandTheme || singleState.formData?.issueTopic || "週報";
+    const { generateDocx } = await import("@/lib/export-docx");
+    const blob = await generateDocx("單篇週報", brand, [singleState.email]);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${brand}-單篇週報.docx`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [singleState]);
+
+  const handleSingleExportTxt = useCallback(() => {
+    if (!singleState.email) {
+      setError({ code: "UNKNOWN", title: "尚無已產生的文案可匯出", action: "請先產生單篇週報後再匯出。" });
+      return;
+    }
+    const e = singleState.email;
+    const brand = singleState.formData?.brandTheme || singleState.formData?.issueTopic || "週報";
+    const content = [
+      `單篇週報 — ${brand}`,
+      "=".repeat(40),
+      "",
+      `主旨：${e.subject}`,
+      `備用主旨（A/B test）：${e.subjectAlt}`,
+      `預覽文字：${e.previewText}`,
+      "",
+      "正文：",
+      e.body,
+      "",
+      `CTA：${e.cta}`,
+    ].join("\n");
+    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${brand}-單篇週報.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [singleState]);
+
   // ── Copy ──
   const handleCopy = useCallback(async (email: EmailObject) => {
     const text = `主旨：${email.subject}\n預覽文字：${email.previewText}\n\n${email.body}\n\nCTA：${email.cta}`;
@@ -536,7 +735,10 @@ export default function EmailGeneratorPage() {
     { key: "trust", label: "信任信" },
     { key: "sales", label: "銷售信" },
     { key: "article", label: "從舊文產生" },
+    { key: "single", label: "單篇週報" },
   ];
+
+  const singleEmail = singleState.email;
 
   // ── Kit data ──
   const kitEmails = displayEmails.filter((e): e is EmailObject => e !== null);
@@ -597,7 +799,7 @@ export default function EmailGeneratorPage() {
       </div>
 
       {/* ── Form step ── */}
-      {displayStep === "form" && (
+      {!isSingleTab && displayStep === "form" && (
         <div className="mx-auto max-w-3xl">
           {activeTab === "trust" ? (
             <TrustForm onSubmit={handleSubmit} />
@@ -606,6 +808,86 @@ export default function EmailGeneratorPage() {
           ) : (
             <ArticleForm onSubmit={handleArticleSubmit} />
           )}
+        </div>
+      )}
+
+      {/* ── Single newsletter: form ── */}
+      {isSingleTab && singleState.step === "form" && (
+        <div className="mx-auto max-w-3xl">
+          <SingleForm onSubmit={handleSingleSubmit} />
+        </div>
+      )}
+
+      {/* ── Single newsletter: generating ── */}
+      {isSingleTab && singleState.step === "generating" && (
+        <div className="flex min-h-[50vh] flex-col items-center justify-center">
+          <div className="text-center">
+            <div className="mx-auto mb-6 h-16 w-16 animate-spin rounded-full border-4 border-[#1a2e1a] border-t-[#c9a84c]" />
+            <h2 className="text-2xl font-bold text-[#1a2e1a]" style={{ fontFamily: "var(--font-playfair), serif" }}>
+              正在撰寫單篇週報...
+            </h2>
+            <p className="mt-2 text-gray-600">AI 正在為「{singleState.formData?.issueTopic}」撰寫內容</p>
+            <p className="mt-3 text-sm text-gray-500">約 15~30 秒</p>
+          </div>
+        </div>
+      )}
+
+      {/* ── Single newsletter: results ── */}
+      {isSingleTab && singleState.step === "results" && (
+        <div className="mx-auto max-w-3xl">
+          <div className="mb-6 flex flex-wrap items-center gap-2">
+            <button
+              onClick={handleSingleExportDocx}
+              className="rounded-lg border border-[#1a2e1a] px-4 py-2 text-sm font-medium text-[#1a2e1a] transition-colors hover:bg-[#1a2e1a] hover:text-white"
+            >
+              匯出 DOCX
+            </button>
+            <button
+              onClick={handleSingleExportTxt}
+              className="rounded-lg border border-[#1a2e1a] px-4 py-2 text-sm font-medium text-[#1a2e1a] transition-colors hover:bg-[#1a2e1a] hover:text-white"
+            >
+              匯出 TXT
+            </button>
+            <button
+              onClick={() => {
+                if (!singleEmail) {
+                  setError({ code: "UNKNOWN", title: "請先產生單篇週報，才能發布到 Kit", action: "回到表單填寫資料後，點「產生單篇週報」按鈕。" });
+                  return;
+                }
+                setKitOpen(true);
+              }}
+              className="rounded-lg bg-[#c9a84c] px-4 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-[#b89740]"
+            >
+              發布到 Kit
+            </button>
+            <button
+              onClick={() => {
+                setSingleState({ ...INIT_SINGLE });
+                setSingleExpanded(true);
+              }}
+              className="ml-auto rounded-lg px-4 py-2 text-sm text-gray-500 transition-colors hover:bg-white"
+            >
+              重新填寫
+            </button>
+          </div>
+
+          <EmailCard
+            email={singleEmail}
+            index={0}
+            dayInfo={{
+              day: 0,
+              theme: singleState.formData?.issueTopic || "單篇週報",
+              strategyGoal: "",
+              sendTiming: "單篇發送",
+            }}
+            isRegenerating={regeneratingKey === "single-0"}
+            onRegenerate={(instr) => handleSingleRegenerate(instr)}
+            onCopy={singleEmail ? () => handleCopy(singleEmail) : undefined}
+            onUpdate={(updated) => handleSingleUpdate(updated)}
+            isExpanded={singleExpanded}
+            onToggleExpand={() => setSingleExpanded((v) => !v)}
+            hideDayBadge
+          />
         </div>
       )}
 
@@ -623,7 +905,7 @@ export default function EmailGeneratorPage() {
       )}
 
       {/* ── Generating step ── */}
-      {displayStep === "generating" && (
+      {!isSingleTab && displayStep === "generating" && (
         <div className="flex min-h-[50vh] flex-col items-center justify-center">
           <div className="text-center">
             <div className="mx-auto mb-6 h-16 w-16 animate-spin rounded-full border-4 border-[#1a2e1a] border-t-[#c9a84c]" />
@@ -640,7 +922,7 @@ export default function EmailGeneratorPage() {
       )}
 
       {/* ── Results step ── */}
-      {displayStep === "results" && (
+      {!isSingleTab && displayStep === "results" && (
         <div className="mx-auto max-w-4xl">
           {/* Actions bar */}
           <div className="mb-6 flex flex-wrap items-center gap-2">
@@ -821,11 +1103,19 @@ export default function EmailGeneratorPage() {
         </div>
       )}
 
-      {/* Kit integration modal */}
-      {kitOpen && kitEmails.length > 0 && (
+      {/* Kit integration modal (7-email sequence) */}
+      {kitOpen && !isSingleTab && kitEmails.length > 0 && (
         <KitIntegration
           emails={kitEmails}
           sequenceName={kitSeqName}
+          onClose={() => setKitOpen(false)}
+        />
+      )}
+
+      {/* Kit broadcast modal (single newsletter) */}
+      {kitOpen && isSingleTab && singleEmail && (
+        <KitBroadcast
+          email={singleEmail}
           onClose={() => setKitOpen(false)}
         />
       )}

@@ -97,6 +97,48 @@ export async function createSequenceEmail(
   return data.email;
 }
 
+// ── Broadcasts (one-off newsletters) ──
+
+export interface CreateBroadcastParams {
+  subject: string;
+  preview_text: string;
+  content: string;
+  description?: string;
+}
+
+export interface KitBroadcast {
+  id: number;
+  subject: string;
+}
+
+/**
+ * Create a broadcast as a DRAFT (send_at: null, public: false).
+ * Works on the free Newsletter plan — broadcasts are not gated like sequences.
+ */
+export async function createBroadcast(
+  apiKey: string,
+  params: CreateBroadcastParams,
+): Promise<KitBroadcast> {
+  const res = await fetch(`${KIT_BASE}/broadcasts`, {
+    method: "POST",
+    headers: kitHeaders(apiKey),
+    body: JSON.stringify({
+      subject: params.subject,
+      preview_text: params.preview_text,
+      content: params.content,
+      description: params.description ?? params.subject,
+      public: false,
+      send_at: null,
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Kit API error ${res.status}: ${text}`);
+  }
+  const data = await res.json();
+  return data.broadcast;
+}
+
 // ── Helpers ──
 
 export function markdownToHtml(md: string): string {

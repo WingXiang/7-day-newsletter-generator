@@ -455,3 +455,152 @@ export const SALES_FIELD_HINTS: Record<string, { label: string; why: string; pla
   bonuses: { label: "加值贈品", why: "額外贈品能增加產品感知價值，提高轉換率", placeholder: "例：購買即贈一對一諮詢 30 分鐘" },
   testimonials: { label: "成功案例 / 見證", why: "真實的成功案例能大幅提升轉換率", placeholder: "貼上學員見證、使用者回饋" },
 };
+
+// ── Single weekly newsletter (單篇週報) ──
+
+export type SingleLayout = "viewpoint" | "curation" | "teaching";
+
+export interface SingleLayoutDef {
+  key: SingleLayout;
+  label: string;
+  desc: string;
+  structure: string;
+}
+
+export const SINGLE_LAYOUTS: SingleLayoutDef[] = [
+  {
+    key: "viewpoint",
+    label: "觀點型",
+    desc: "以一個主題切入，分享你的觀點與洞察（偏個人品牌、深度內容）",
+    structure: `1. 開場鉤子：用故事、提問或反差開場，勾住讀者繼續往下讀
+2. 核心觀點：圍繞本期主題，論述你的觀點與洞察，言之有物、有自己的角度
+3. 行動建議：給讀者一個具體、當下就能做的小行動
+4. 結尾自然帶出一個明確的 CTA`,
+  },
+  {
+    key: "curation",
+    label: "策展型",
+    desc: "本週主題短評 + 數則精選內容摘要（偏資訊整理、輕量易讀）",
+    structure: `1. 主題短評：用幾句話點出本期主題為什麼值得關注
+2. 精選內容：整理 3 至 4 則與主題相關的重點、觀察或資源，每則獨立成段、簡潔有料
+3. 用一句話的行動建議收尾，自然帶出 CTA`,
+  },
+  {
+    key: "teaching",
+    label: "教學型",
+    desc: "一個具體技巧或步驟教學（偏實用工具型內容）",
+    structure: `1. 痛點：點出讀者在本期主題上常遇到的卡關或困難
+2. 方法步驟：把做法拆成 2 至 4 個清楚的步驟
+3. 範例：用一個具體例子示範怎麼套用這個方法
+4. 延伸 CTA：邀請讀者進一步行動`,
+  },
+];
+
+export interface SingleFormData {
+  layout: SingleLayout;
+  /** "topic" = 直接填主題；"article" = 沿用舊文風格 */
+  inputMode: "topic" | "article";
+  brandTheme: string;
+  issueTopic: string;
+  articles?: ArticleEntry[];
+  targetAudience?: string;
+  keyPoints?: string;
+  ctaGoal?: string;
+  toneStyle: ToneStyle;
+  customTone?: string;
+}
+
+export const SINGLE_FIELD_HINTS: Record<string, { label: string; why: string; placeholder: string }> = {
+  targetAudience: { label: "目標受眾", why: "越具體描述讀者，AI 產出的內容越精準", placeholder: "你的讀者是誰？他們關心什麼？" },
+  keyPoints: { label: "想帶到的重點", why: "讓 AI 知道這期一定要提到的關鍵訊息", placeholder: "這期一定要讓讀者記住的 1-2 個重點" },
+  ctaGoal: { label: "CTA 目標", why: "讓 AI 在結尾設計合適的行動呼籲", placeholder: "例：引導報名課程、追蹤社群、回信分享" },
+};
+
+export function buildSinglePrompt(opts: {
+  layout: SingleLayout;
+  brandTheme?: string;
+  issueTopic: string;
+  articleTexts?: string[];
+  targetAudience?: string;
+  keyPoints?: string;
+  ctaGoal?: string;
+  toneStyle?: ToneStyle;
+  customTone?: string;
+  additionalInstructions?: string;
+}): string {
+  const layoutDef = SINGLE_LAYOUTS.find((l) => l.key === opts.layout) ?? SINGLE_LAYOUTS[0];
+  const toneText =
+    opts.toneStyle === "custom"
+      ? opts.customTone || "自然親切"
+      : opts.toneStyle
+      ? TONE_LABELS[opts.toneStyle]
+      : "自然親切";
+
+  const hasArticles = !!opts.articleTexts && opts.articleTexts.length > 0;
+  const parts: string[] = [];
+
+  if (hasArticles) {
+    const articleSection = opts.articleTexts!
+      .map((t, i) => `=== 文章 ${i + 1} ===\n${t}`)
+      .join("\n\n");
+    parts.push(
+      `以下是品牌過往的 ${opts.articleTexts!.length} 篇文章，請先分析其寫作風格、語氣與用詞，撰寫本期週報時嚴格模仿：`,
+      ``,
+      articleSection,
+      ``,
+      `---`,
+      ``,
+    );
+  }
+
+  parts.push(`## 品牌與本期資訊`, ``);
+  if (opts.brandTheme) parts.push(`- 品牌主題 / 定位：${opts.brandTheme}`);
+  parts.push(`- 本期主題：${opts.issueTopic}`);
+  if (opts.targetAudience) parts.push(`- 目標受眾：${opts.targetAudience}`);
+  if (opts.keyPoints) parts.push(`- 想帶到的重點：${opts.keyPoints}`);
+  if (opts.ctaGoal) parts.push(`- CTA 目標：${opts.ctaGoal}`);
+  parts.push(`- 語氣風格：${toneText}`);
+
+  parts.push(
+    ``,
+    `---`,
+    ``,
+    `## 任務`,
+    ``,
+    `請撰寫一封「${layoutDef.label}」的單篇週電子報，主題聚焦在「${opts.issueTopic}」。`,
+    ``,
+    `### 正文結構（${layoutDef.label}）`,
+    layoutDef.structure,
+  );
+
+  if (hasArticles) {
+    parts.push(
+      ``,
+      `### 風格要求`,
+      `嚴格模仿上方文章的寫作風格、語氣與用詞習慣，讓讀者感覺這封信和熟悉的作者風格完全一致。品牌名稱與定位若文章中可推斷則沿用。`,
+    );
+  }
+
+  if (opts.additionalInstructions) {
+    parts.push(``, `### 額外指示`, opts.additionalInstructions);
+  }
+
+  parts.push(
+    ``,
+    `請以 JSON 格式回覆。正文請用純文字格式撰寫，使用段落換行來組織內容，不要使用任何 emoji、圖示符號、** 粗體標記或其他 markdown 格式符號。正文長度建議在 400-700 字之間。`,
+  );
+
+  return parts.join("\n");
+}
+
+export const SINGLE_EXAMPLE_DATA: SingleFormData = {
+  layout: "viewpoint",
+  inputMode: "topic",
+  brandTheme: "學習羅盤｜陪工作繁忙的上班族，用對方法持續學習",
+  issueTopic: "為什麼「降低門檻」比「增強意志力」更能讓你持續學習",
+  toneStyle: "friendly",
+  customTone: "",
+  targetAudience: "25-40 歲、工作繁忙的上班族，想持續學習卻覺得沒時間或半途而廢",
+  keyPoints: "意志力會耗盡，但門檻可以被設計；每天 7 分鐘也能累積出可觀成果",
+  ctaGoal: "邀請讀者回信分享自己最近做過的一個「降低門檻」小行動",
+};

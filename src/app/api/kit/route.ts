@@ -4,14 +4,17 @@ import {
   listSequences,
   createSequence,
   createSequenceEmail,
+  createBroadcast,
   type CreateEmailParams,
+  type CreateBroadcastParams,
 } from "@/lib/kit-api";
 
 type Action =
   | { action: "verify"; apiKey: string }
   | { action: "list-sequences"; apiKey: string }
   | { action: "create-sequence"; apiKey: string; name: string }
-  | { action: "create-email"; apiKey: string; sequenceId: number; params: CreateEmailParams };
+  | { action: "create-email"; apiKey: string; sequenceId: number; params: CreateEmailParams }
+  | { action: "create-broadcast"; apiKey: string; params: CreateBroadcastParams };
 
 export async function POST(req: NextRequest) {
   const body = (await req.json()) as Action;
@@ -37,6 +40,10 @@ export async function POST(req: NextRequest) {
           body.params,
         );
         return NextResponse.json({ email });
+      }
+      case "create-broadcast": {
+        const broadcast = await createBroadcast(body.apiKey, body.params);
+        return NextResponse.json({ broadcast });
       }
       default:
         return NextResponse.json({ error: "Unknown action" }, { status: 400 });

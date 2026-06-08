@@ -13,11 +13,13 @@ interface EmailCardProps {
   onUpdate?: (updated: EmailObject) => void;
   isExpanded: boolean;
   onToggleExpand: () => void;
+  /** When true, hide the "Day N" badge & numbering (used for single newsletter). */
+  hideDayBadge?: boolean;
 }
 
 export default function EmailCard({
   email, index, dayInfo, isRegenerating, onRegenerate, onCopy, onUpdate,
-  isExpanded, onToggleExpand,
+  isExpanded, onToggleExpand, hideDayBadge = false,
 }: EmailCardProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [editSubject, setEditSubject] = useState("");
@@ -64,9 +66,9 @@ export default function EmailCard({
     return (
       <div className="rounded-xl border border-dashed border-gray-300 bg-white/50 p-6">
         <div className="flex items-center gap-3">
-          <span className="flex h-9 w-9 items-center justify-center rounded-full bg-gray-200 text-sm font-medium text-gray-500">{index + 1}</span>
+          <span className="flex h-9 w-9 items-center justify-center rounded-full bg-gray-200 text-sm font-medium text-gray-500">{hideDayBadge ? "✉" : index + 1}</span>
           <div className="flex-1">
-            <p className="text-sm font-medium text-gray-500">Day {dayInfo.day} — {dayInfo.theme}</p>
+            <p className="text-sm font-medium text-gray-500">{hideDayBadge ? dayInfo.theme : `Day ${dayInfo.day} — ${dayInfo.theme}`}</p>
             <p className="text-xs text-gray-400">尚未產生</p>
           </div>
           <button onClick={() => onRegenerate()} disabled={isRegenerating} className="rounded-lg bg-[#1a2e1a] px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-[#2a4a2a] disabled:opacity-50">
@@ -81,11 +83,17 @@ export default function EmailCard({
     <div className="flex h-full flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm transition-shadow hover:shadow-md">
       {/* Header */}
       <button onClick={onToggleExpand} className="flex w-full items-start gap-3 p-4 text-left">
-        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#1a2e1a] text-xs font-semibold text-white">{index + 1}</span>
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#1a2e1a] text-xs font-semibold text-white">{hideDayBadge ? "✉" : index + 1}</span>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-1.5">
-            <span className="rounded bg-[#f5f0e8] px-2 py-0.5 text-xs font-medium text-[#1a2e1a]">Day {dayInfo.day}</span>
-            <span className="text-xs text-gray-400">{dayInfo.theme}</span>
+            {hideDayBadge ? (
+              <span className="rounded bg-[#f5f0e8] px-2 py-0.5 text-xs font-medium text-[#1a2e1a]">{dayInfo.theme}</span>
+            ) : (
+              <>
+                <span className="rounded bg-[#f5f0e8] px-2 py-0.5 text-xs font-medium text-[#1a2e1a]">Day {dayInfo.day}</span>
+                <span className="text-xs text-gray-400">{dayInfo.theme}</span>
+              </>
+            )}
           </div>
           <p className="mt-1 line-clamp-2 text-sm font-medium text-gray-900">{email.subject}</p>
         </div>
