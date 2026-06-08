@@ -109,7 +109,7 @@ const INIT_SINGLE: SingleState = {
 };
 
 export default function EmailGeneratorPage() {
-  const [activeTab, setActiveTab] = useState<Tab>("trust");
+  const [activeTab, setActiveTab] = useState<Tab>("single");
   const [trustState, setTrustState] = useState<SeqState>({ ...INIT_SEQ });
   const [salesState, setSalesState] = useState<SeqState>({ ...INIT_SEQ });
   const [articleState, setArticleState] = useState<ArticleSeqState>({ ...INIT_ARTICLE_SEQ, emails: Array(7).fill(null) });
@@ -732,10 +732,10 @@ export default function EmailGeneratorPage() {
 
   // ── Tab definitions ──
   const TABS: { key: Tab; label: string }[] = [
-    { key: "trust", label: "信任信" },
-    { key: "sales", label: "銷售信" },
-    { key: "article", label: "從舊文產生" },
     { key: "single", label: "單篇週報" },
+    { key: "article", label: "從舊文產生" },
+    { key: "trust", label: "7 天信任信" },
+    { key: "sales", label: "7 天銷售信" },
   ];
 
   const singleEmail = singleState.email;
